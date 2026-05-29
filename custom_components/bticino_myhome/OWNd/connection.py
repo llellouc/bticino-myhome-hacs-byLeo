@@ -701,6 +701,23 @@ class OWNCommandSession(OWNSession):
         actively reconnecting it if it had been reset."""
 
         try:
+            if (
+                self._stream_reader is None
+                or self._stream_writer is None
+                or self._stream_writer.is_closing()
+            ):
+                self._logger.warning(
+                    "%s Command session was not connected. Reconnecting...",
+                    self._gateway.log_id,
+                )
+                negotiation = await self.connect()
+                if (
+                    not negotiation
+                    or not negotiation.get("Success", False)
+                    or self._stream_writer is None
+                    or self._stream_writer.is_closing()
+                ):
+                    raise ConnectionError("command session is not connected")
 
             self._stream_writer.write(str(message).encode())
             await self._stream_writer.drain()
@@ -734,13 +751,33 @@ class OWNCommandSession(OWNSession):
                     self._logger.info(log_message, self._gateway.log_id, message)
                 else:
                     self._logger.debug(log_message, self._gateway.log_id, message)
-                    
-        except (ConnectionResetError, asyncio.IncompleteReadError):
-            self._logger.debug(
-                "%s Command session connection reset, retrying...", self._gateway.log_id
+
+        except (
+            ConnectionResetError,
+            asyncio.IncompleteReadError,
+            BrokenPipeError,
+            AttributeError,
+            ConnectionError,
+        ) as err:
+            if attempt <= 2:
+                self._logger.warning(
+                    "%s Command session connection failed (%s). Reconnecting and retrying (%d)...",
+                    self._gateway.log_id,
+                    err,
+                    attempt,
+                )
+                await self.connect()
+                return await self.send(
+                    message=message,
+                    is_status_request=is_status_request,
+                    attempt=attempt + 1,
+                )
+            self._logger.error(
+                "%s Command session connection failed after retries for `%s`.",
+                self._gateway.log_id,
+                message,
             )
-            await self.connect()
-            await self.send(message=message, is_status_request=is_status_request)
+            raise
         except Exception:  # pylint: disable=broad-except
             self._logger.exception("%s Command session crashed.", self._gateway.log_id)
-            return None
+            raise
