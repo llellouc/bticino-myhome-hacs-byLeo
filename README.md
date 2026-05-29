@@ -40,7 +40,7 @@ Prerequisite: HACS must already be installed.
 1. Open Home Assistant and go to `HACS`.
 2. Open the top-right menu (`⋮`) and choose `Custom repositories`.
 3. Add:
-   - Repository: `https://github.com/xmavgithub/bticino-myhome-hacs-integration`
+  - Repository: `https://github.com/llellouc/bticino-myhome-hacs-integration`
    - Category: `Integration`
 4. Click `Add`.
 5. Search for `bticino MyHome` in HACS and open the integration page.
@@ -51,7 +51,7 @@ Prerequisite: HACS must already be installed.
 
 Optional direct link:
 
-`https://my.home-assistant.io/redirect/hacs_repository/?owner=xmavgithub&repository=bticino-myhome-hacs-integration&category=integration`
+`https://my.home-assistant.io/redirect/hacs_repository/?owner=llellouc&repository=bticino-myhome-hacs-integration&category=integration`
 
 ### Manual
 

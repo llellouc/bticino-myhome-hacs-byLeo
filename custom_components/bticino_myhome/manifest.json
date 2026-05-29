@@ -2,17 +2,17 @@
   "domain": "bticino_myhome",
   "name": "bticino MyHome",
   "codeowners": [
-    "@shiko-labs"
+    "@llellouc"
   ],
   "config_flow": true,
   "dependencies": [
     "panel_custom",
     "http"
   ],
-  "documentation": "https://github.com/xmavgithub/bticino-myhome-hacs-integration",
+  "documentation": "https://github.com/llellouc/bticino-myhome-hacs-integration",
   "integration_type": "hub",
   "iot_class": "local_polling",
-  "issue_tracker": "https://github.com/xmavgithub/bticino-myhome-hacs-integration/issues",
+  "issue_tracker": "https://github.com/llellouc/bticino-myhome-hacs-integration/issues",
   "requirements": [
     "python-dateutil",
     "pytz"
@@ -74,5 +74,5 @@
       "modelName": "MH201"
     }
   ],
-  "version": "1.0.0"
+  "version": "1.0.1"
 }
