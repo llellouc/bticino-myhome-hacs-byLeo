@@ -303,9 +303,9 @@ class OWNSession:
                 await asyncio.sleep(retry_timer)
                 retry_count += 1
                 retry_timer = retry_count * 2
-            except ConnectionResetError:
+            except (ConnectionResetError, asyncio.TimeoutError):
                 self._logger.warning(
-                    "%s %s session connection reset, retrying in 60s.",
+                    "%s %s session connection reset or timed out, retrying in 60s.",
                     self._gateway.log_id,
                     self._type.capitalize(),
                 )
@@ -336,7 +336,9 @@ class OWNSession:
         self._stream_writer.write(f"*99*{type_id}##".encode())
         await self._stream_writer.drain()
 
-        raw_response = await self._stream_reader.readuntil(OWNSession.SEPARATOR)
+        raw_response = await asyncio.wait_for(
+            self._stream_reader.readuntil(OWNSession.SEPARATOR), timeout=5
+        )
         resulting_message = OWNSignaling(raw_response.decode())
         # self._logger.debug("%s Reply: `%s`", self._gateway.log_id, resulting_message)
 
@@ -347,7 +349,9 @@ class OWNSession:
             error = True
             error_message = "connection_refused"
 
-        raw_response = await self._stream_reader.readuntil(OWNSession.SEPARATOR)
+        raw_response = await asyncio.wait_for(
+            self._stream_reader.readuntil(OWNSession.SEPARATOR), timeout=5
+        )
         resulting_message = OWNSignaling(raw_response.decode())
         if resulting_message.is_nack():
             error = True
@@ -388,7 +392,9 @@ class OWNSession:
                 )
                 self._stream_writer.write("*#*1##".encode())
                 await self._stream_writer.drain()
-                raw_response = await self._stream_reader.readuntil(OWNSession.SEPARATOR)
+                raw_response = await asyncio.wait_for(
+                    self._stream_reader.readuntil(OWNSession.SEPARATOR), timeout=5
+                )
                 resulting_message = OWNSignaling(raw_response.decode())
                 if resulting_message.is_nonce():
                     server_random_string_ra = resulting_message.nonce
@@ -480,7 +486,9 @@ class OWNSession:
                 )
                 self._stream_writer.write(hashed_password.encode())
                 await self._stream_writer.drain()
-                raw_response = await self._stream_reader.readuntil(OWNSession.SEPARATOR)
+                raw_response = await asyncio.wait_for(
+                    self._stream_reader.readuntil(OWNSession.SEPARATOR), timeout=5
+                )
                 resulting_message = OWNSignaling(raw_response.decode())
                 # self._logger.debug("%s Reply: `%s`", self._gateway.log_id, resulting_message)
                 if resulting_message.is_nack():
@@ -721,7 +729,9 @@ class OWNCommandSession(OWNSession):
 
             self._stream_writer.write(str(message).encode())
             await self._stream_writer.drain()
-            raw_response = await self._stream_reader.readuntil(OWNSession.SEPARATOR)
+            raw_response = await asyncio.wait_for(
+                self._stream_reader.readuntil(OWNSession.SEPARATOR), timeout=10
+            )
             resulting_message = OWNMessage.parse(raw_response.decode())
 
             while not isinstance(resulting_message, OWNSignaling):
@@ -731,7 +741,9 @@ class OWNCommandSession(OWNSession):
                     message,
                     resulting_message,
                 )
-                raw_response = await self._stream_reader.readuntil(OWNSession.SEPARATOR)
+                raw_response = await asyncio.wait_for(
+                    self._stream_reader.readuntil(OWNSession.SEPARATOR), timeout=10
+                )
                 resulting_message = OWNMessage.parse(raw_response.decode())
 
             if resulting_message.is_nack():
@@ -755,6 +767,7 @@ class OWNCommandSession(OWNSession):
         except (
             ConnectionResetError,
             asyncio.IncompleteReadError,
+            asyncio.TimeoutError,
             BrokenPipeError,
             AttributeError,
             ConnectionError,

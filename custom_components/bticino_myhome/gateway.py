@@ -469,24 +469,25 @@ class MyHOMEGatewayHandler:
         """Listen for events from the gateway with retry logic."""
         self._terminate_listener = False
         retry_count = 0
-        max_retries = 5
         base_delay = 2  # seconds
+        max_backoff = 60  # seconds
 
         LOGGER.debug("%s Creating listening worker.", self.log_id)
 
-        # Outer loop: Retry connection on failure
-        while not self._terminate_listener and retry_count < max_retries:
+        # Outer loop: Retry connection indefinitely until explicitly terminated.
+        # No max_retries cap: the gateway may be temporarily unreachable (network
+        # glitch, firmware freeze, power cycle) and must be able to recover on its own.
+        while not self._terminate_listener:
             _event_session = None
             try:
                 # Connect to gateway with exponential backoff on retry
                 if retry_count > 0:
-                    delay = base_delay * (2 ** (retry_count - 1))
+                    delay = min(base_delay * (2 ** (retry_count - 1)), max_backoff)
                     LOGGER.warning(
-                        "%s Connection failed, retrying in %s seconds (attempt %s/%s)",
+                        "%s Connection failed, retrying in %s seconds (attempt %s)",
                         self.log_id,
                         delay,
                         retry_count + 1,
-                        max_retries,
                     )
                     await asyncio.sleep(delay)
 
@@ -496,6 +497,9 @@ class MyHOMEGatewayHandler:
                 retry_count = 0  # Reset retry count on successful connection
                 LOGGER.info("%s Successfully connected to gateway.", self.log_id)
 
+            except asyncio.CancelledError:
+                LOGGER.info("%s Listener cancelled.", self.log_id)
+                break
             except (OSError, ConnectionError, TimeoutError) as conn_err:
                 retry_count += 1
                 self.is_connected = False
@@ -504,20 +508,15 @@ class MyHOMEGatewayHandler:
                     self.log_id,
                     conn_err,
                 )
-                if retry_count >= max_retries:
-                    LOGGER.error(
-                        "%s Maximum retry attempts reached, listener stopping.",
-                        self.log_id,
-                    )
-                    break
                 continue
             except Exception as e:
+                retry_count += 1
                 LOGGER.exception(
                     "%s Unexpected error during connection: %s",
                     self.log_id,
                     e,
                 )
-                break
+                continue
 
             # Inner loop: Process messages
             try:
@@ -987,6 +986,15 @@ class MyHOMEGatewayHandler:
         return True
 
     async def send(self, message: OWNCommand):
+        workers_alive = [w for w in self.sending_workers if not w.done()]
+        LOGGER.warning(
+            "%s [DIAG] send() called for `%s` — queue size: %s, workers alive: %s/%s",
+            self.log_id,
+            message,
+            self.send_buffer.qsize(),
+            len(workers_alive),
+            len(self.sending_workers),
+        )
         await self.send_buffer.put({"message": message, "is_status_request": False})
         LOGGER.debug(
             "%s Message `%s` was successfully queued.",
