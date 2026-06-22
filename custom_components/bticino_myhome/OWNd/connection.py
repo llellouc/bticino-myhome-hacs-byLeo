@@ -665,24 +665,24 @@ class OWNEventSession(OWNSession):
         """Acts as an entry point to read messages on the event bus.
         It will read one frame and return it as an OWNMessage object"""
         try:
-            data = await self._stream_reader.readuntil(OWNSession.SEPARATOR)
+            data = await asyncio.wait_for(
+                self._stream_reader.readuntil(OWNSession.SEPARATOR),
+                timeout=120,
+            )
             _decoded_data = data.decode()
             _message = OWNMessage.parse(_decoded_data)
             return _message if _message else _decoded_data
-        except asyncio.IncompleteReadError:
-            self._logger.warning(
-                "%s Connection interrupted, reconnecting...", self._gateway.log_id
-            )
-            await self.connect()
-            return None
+        except (asyncio.IncompleteReadError, asyncio.TimeoutError) as err:
+            # Propagate to the outer listening loop so it can reconnect cleanly
+            # and trigger a re-poll of entity states.
+            raise ConnectionError(f"Event session connection lost: {err}") from err
+        except ConnectionError:
+            raise
         except AttributeError:
             self._logger.exception(
                 "%s Received data could not be parsed into a message:",
                 self._gateway.log_id,
             )
-            return None
-        except ConnectionError:
-            self._logger.exception("%s Connection error:", self._gateway.log_id)
             return None
         except Exception:  # pylint: disable=broad-except
             self._logger.exception("%s Event session crashed.", self._gateway.log_id)
@@ -704,10 +704,12 @@ class OWNCommandSession(OWNSession):
         connection = cls(gateway)
         await connection.connect()
 
-    async def send(self, message, is_status_request: bool = False, attempt: int = 1):
+    async def send(self, message, is_status_request: bool = False, attempt: int = 1) -> list:
         """Send the attached message on an existing 'command' connection,
-        actively reconnecting it if it had been reset."""
+        actively reconnecting it if it had been reset.
+        Returns intermediate OWNMessage responses received before the final ACK/NACK."""
 
+        intermediate_responses = []
         try:
             if (
                 self._stream_reader is None
@@ -741,6 +743,8 @@ class OWNCommandSession(OWNSession):
                     message,
                     resulting_message,
                 )
+                if isinstance(resulting_message, OWNMessage):
+                    intermediate_responses.append(resulting_message)
                 raw_response = await asyncio.wait_for(
                     self._stream_reader.readuntil(OWNSession.SEPARATOR), timeout=10
                 )
@@ -763,6 +767,8 @@ class OWNCommandSession(OWNSession):
                     self._logger.info(log_message, self._gateway.log_id, message)
                 else:
                     self._logger.debug(log_message, self._gateway.log_id, message)
+
+            return intermediate_responses
 
         except (
             ConnectionResetError,

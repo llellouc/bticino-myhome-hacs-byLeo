@@ -496,6 +496,7 @@ class MyHOMEGatewayHandler:
                 self.is_connected = True
                 retry_count = 0  # Reset retry count on successful connection
                 LOGGER.info("%s Successfully connected to gateway.", self.log_id)
+                await self._repoll_climate_entities()
 
             except asyncio.CancelledError:
                 LOGGER.info("%s Listener cancelled.", self.log_id)
@@ -778,13 +779,18 @@ class MyHOMEGatewayHandler:
                 if isinstance(e, asyncio.CancelledError):
                     LOGGER.info("%s Listener cancelled.", self.log_id)
                     break  # Exit retry loop
+                elif isinstance(e, ConnectionError):
+                    LOGGER.warning(
+                        "%s Event session connection lost: %s. Reconnecting...",
+                        self.log_id,
+                        e,
+                    )
                 else:
                     LOGGER.error(
                         "%s Connection lost during message processing: %s",
                         self.log_id,
                         e,
                     )
-                    # Will retry connection in outer loop
             except KeyError as ke:
                 # Entity not found in hass.data - likely race condition during startup
                 LOGGER.warning(
@@ -903,10 +909,12 @@ class MyHOMEGatewayHandler:
                     task["message"],
                     worker_id,
                 )
-                await command_session.send(
+                responses = await command_session.send(
                     message=task["message"],
                     is_status_request=task["is_status_request"],
                 )
+                if task["is_status_request"] and responses:
+                    self._dispatch_command_responses(responses)
                 retry_count = 0
             except asyncio.CancelledError:
                 retry_task = not self._terminate_sender
@@ -1001,6 +1009,54 @@ class MyHOMEGatewayHandler:
             self.log_id,
             message,
         )
+
+    async def _repoll_climate_entities(self) -> None:
+        """Send status requests for all known climate entities after event session reconnect."""
+        try:
+            climate_data = (
+                self.hass.data
+                .get(DOMAIN, {})
+                .get(self.mac, {})
+                .get(CONF_PLATFORMS, {})
+                .get(CLIMATE, {})
+            )
+            if not climate_data:
+                return
+            LOGGER.debug(
+                "%s Re-polling %d climate entity(-ies) after event session reconnect.",
+                self.log_id,
+                len(climate_data),
+            )
+            for where in climate_data:
+                await self.send_status_request(OWNHeatingCommand.status(where))
+        except Exception:  # pylint: disable=broad-except
+            LOGGER.warning("%s Failed to re-poll climate entities after reconnect.", self.log_id)
+
+    def _dispatch_command_responses(self, messages: list) -> None:
+        """Dispatch OWNMessage responses received on the command session to entities.
+
+        Used to make status request responses (e.g. from async_update) effective,
+        since those responses only come back on the command session, not the event session.
+        """
+        try:
+            platforms = (
+                self.hass.data
+                .get(DOMAIN, {})
+                .get(self.mac, {})
+                .get(CONF_PLATFORMS, {})
+            )
+        except Exception:  # pylint: disable=broad-except
+            return
+
+        for message in messages:
+            if isinstance(message, OWNHeatingEvent):
+                climate_platform = platforms.get(CLIMATE, {})
+                if message.entity not in climate_platform:
+                    continue
+                for _entity in climate_platform[message.entity].get(CONF_ENTITIES, {}):
+                    entity = climate_platform[message.entity][CONF_ENTITIES][_entity]
+                    if isinstance(entity, MyHOMEEntity):
+                        entity.handle_event(message)
 
     async def send_status_request(self, message: OWNCommand):
         await self.send_buffer.put({"message": message, "is_status_request": True})
