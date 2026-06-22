@@ -334,7 +334,7 @@ class OWNSession:
         )
 
         self._stream_writer.write(f"*99*{type_id}##".encode())
-        await self._stream_writer.drain()
+        await asyncio.wait_for(self._stream_writer.drain(), timeout=10)
 
         raw_response = await asyncio.wait_for(
             self._stream_reader.readuntil(OWNSession.SEPARATOR), timeout=5
@@ -376,7 +376,7 @@ class OWNSession:
                     self._gateway.log_id,
                 )
                 self._stream_writer.write("*#*0##".encode())
-                await self._stream_writer.drain()
+                await asyncio.wait_for(self._stream_writer.drain(), timeout=10)
             else:
                 method = "sha"
                 if resulting_message.is_sha_1():
@@ -391,7 +391,7 @@ class OWNSession:
                     method,
                 )
                 self._stream_writer.write("*#*1##".encode())
-                await self._stream_writer.drain()
+                await asyncio.wait_for(self._stream_writer.drain(), timeout=10)
                 raw_response = await asyncio.wait_for(
                     self._stream_reader.readuntil(OWNSession.SEPARATOR), timeout=5
                 )
@@ -411,7 +411,7 @@ class OWNSession:
                         self._type,
                     )
                     self._stream_writer.write(hashed_password.encode())
-                    await self._stream_writer.drain()
+                    await asyncio.wait_for(self._stream_writer.drain(), timeout=10)
                     try:
                         raw_response = await asyncio.wait_for(
                             self._stream_reader.readuntil(OWNSession.SEPARATOR),
@@ -441,7 +441,7 @@ class OWNSession:
                                 #     "%s Server identity confirmed.", self._gateway.log_id
                                 # )
                                 self._stream_writer.write("*#*1##".encode())
-                                await self._stream_writer.drain()
+                                await asyncio.wait_for(self._stream_writer.drain(), timeout=10)
                                 self._logger.debug(
                                     "%s Session established successfully.", self._gateway.log_id
                                 )
@@ -451,7 +451,7 @@ class OWNSession:
                                     self._gateway.log_id,
                                 )
                                 self._stream_writer.write("*#*0##".encode())
-                                await self._stream_writer.drain()
+                                await asyncio.wait_for(self._stream_writer.drain(), timeout=10)
                                 error = True
                                 error_message = "negociation_error"
                                 self._logger.error(
@@ -485,7 +485,7 @@ class OWNSession:
                     "%s Sending %s session password.", self._gateway.log_id, self._type
                 )
                 self._stream_writer.write(hashed_password.encode())
-                await self._stream_writer.drain()
+                await asyncio.wait_for(self._stream_writer.drain(), timeout=10)
                 raw_response = await asyncio.wait_for(
                     self._stream_reader.readuntil(OWNSession.SEPARATOR), timeout=5
                 )
@@ -730,7 +730,7 @@ class OWNCommandSession(OWNSession):
                     raise ConnectionError("command session is not connected")
 
             self._stream_writer.write(str(message).encode())
-            await self._stream_writer.drain()
+            await asyncio.wait_for(self._stream_writer.drain(), timeout=10)
             raw_response = await asyncio.wait_for(
                 self._stream_reader.readuntil(OWNSession.SEPARATOR), timeout=10
             )

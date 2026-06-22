@@ -496,7 +496,7 @@ class MyHOMEGatewayHandler:
                 self.is_connected = True
                 retry_count = 0  # Reset retry count on successful connection
                 LOGGER.info("%s Successfully connected to gateway.", self.log_id)
-                await self._repoll_climate_entities()
+                await self._repoll_all_entities()
 
             except asyncio.CancelledError:
                 LOGGER.info("%s Listener cancelled.", self.log_id)
@@ -1010,27 +1010,41 @@ class MyHOMEGatewayHandler:
             message,
         )
 
-    async def _repoll_climate_entities(self) -> None:
-        """Send status requests for all known climate entities after event session reconnect."""
+    async def _repoll_all_entities(self) -> None:
+        """Send status requests for all known entities after event session reconnect."""
         try:
-            climate_data = (
+            platforms = (
                 self.hass.data
                 .get(DOMAIN, {})
                 .get(self.mac, {})
                 .get(CONF_PLATFORMS, {})
-                .get(CLIMATE, {})
             )
-            if not climate_data:
+            if not platforms:
                 return
+
+            total = 0
+            for platform, entities in platforms.items():
+                if platform == BUTTON:
+                    continue
+                for where in entities:
+                    try:
+                        if platform == CLIMATE:
+                            await self.send_status_request(OWNHeatingCommand.status(where))
+                        elif platform == LIGHT:
+                            await self.send_status_request(OWNLightingCommand.status(where))
+                        elif platform == "cover":
+                            await self.send_status_request(OWNAutomationCommand.status(where))
+                        total += 1
+                    except Exception:  # pylint: disable=broad-except
+                        pass
+
             LOGGER.debug(
-                "%s Re-polling %d climate entity(-ies) after event session reconnect.",
+                "%s Re-polled %d entity(-ies) after event session reconnect.",
                 self.log_id,
-                len(climate_data),
+                total,
             )
-            for where in climate_data:
-                await self.send_status_request(OWNHeatingCommand.status(where))
         except Exception:  # pylint: disable=broad-except
-            LOGGER.warning("%s Failed to re-poll climate entities after reconnect.", self.log_id)
+            LOGGER.warning("%s Failed to re-poll entities after reconnect.", self.log_id)
 
     def _dispatch_command_responses(self, messages: list) -> None:
         """Dispatch OWNMessage responses received on the command session to entities.
@@ -1049,12 +1063,13 @@ class MyHOMEGatewayHandler:
             return
 
         for message in messages:
-            if isinstance(message, OWNHeatingEvent):
-                climate_platform = platforms.get(CLIMATE, {})
-                if message.entity not in climate_platform:
+            for platform, platform_data in platforms.items():
+                if platform == BUTTON:
                     continue
-                for _entity in climate_platform[message.entity].get(CONF_ENTITIES, {}):
-                    entity = climate_platform[message.entity][CONF_ENTITIES][_entity]
+                if message.entity not in platform_data:
+                    continue
+                for _entity in platform_data[message.entity].get(CONF_ENTITIES, {}):
+                    entity = platform_data[message.entity][CONF_ENTITIES][_entity]
                     if isinstance(entity, MyHOMEEntity):
                         entity.handle_event(message)
 
