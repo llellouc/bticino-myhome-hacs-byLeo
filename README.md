@@ -14,6 +14,7 @@ This repository maintains and evolves a fork of the original MyHome integration,
 - active discovery and passive discovery from bus activity
 - web UI for device discovery and configuration
 - stronger climate and power support
+- real-world validation against the installed domotics environment at Fort d'Issy-les-Moulineaux
 
 ## Main Features
 
@@ -76,8 +77,9 @@ Use the integration web panel to manage devices:
 ## Fork Credits
 
 This project started as a fork of the original integration:
-
 - https://github.com/anotherjulien/MyHOME
+It also have been a little bit optimized by :
+- https://github.com/xmavgithub/bticino-myhome-hacs-integration
 
 Thanks to the original maintainers and contributors.
 

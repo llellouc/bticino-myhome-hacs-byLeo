@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>BTicino Panel Preview</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 20px;
+        background: #f3f5f8;
+        font-family: "Segoe UI", sans-serif;
+      }
+
+      .hint {
+        max-width: 1080px;
+        margin: 0 auto 12px;
+        color: #4a5568;
+        font-size: 14px;
+      }
+
+      bticino-myhome-discovery-panel {
+        display: block;
+        max-width: 1080px;
+        margin: 0 auto;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="hint">Preview local du panel BTicino avec API mockee.</div>
+    <bticino-myhome-discovery-panel></bticino-myhome-discovery-panel>
+
+    <script type="module" src="../custom_components/bticino_myhome/frontend/bticino-myhome-discovery-main.js"></script>
+    <script type="module">
+      const panel = document.querySelector("bticino-myhome-discovery-panel");
+
+      const mockApi = async (method, path, payload) => {
+        if (path === "bticino_myhome/gateways") {
+          return {
+            gateways: [
+              {
+                mac: "aa:bb:cc:dd:ee:ff",
+                name: "F454 Gateway",
+                host: "192.168.0.91",
+                discovery_by_activation: true,
+              },
+            ],
+          };
+        }
+
+        if (path === "bticino_myhome/discovery_by_activation") {
+          return { gateway: "aa:bb:cc:dd:ee:ff", enabled: true };
+        }
+
+        if (path.startsWith("bticino_myhome/configuration")) {
+          if (path === "bticino_myhome/configuration/device") {
+            return {
+              platform: (payload && payload.platform) || "sensor",
+              key: (payload && payload.key) || "demo",
+              devices: {
+                light: [
+                  {
+                    key: "discovered_light_11",
+                    name: "Light 11",
+                    where: "11",
+                    dimmable: false,
+                  },
+                ],
+                cover: [],
+                climate: [],
+                sensor: [
+                  {
+                    key: "discovered_power_51",
+                    name: "Electricite",
+                    where: "51",
+                    class: "power",
+                    unit_scale: "kilo",
+                    who: "18",
+                  },
+                  {
+                    key: "discovered_power_53",
+                    name: "Eau froide",
+                    where: "53",
+                    class: "water",
+                    unit_scale: "base",
+                    who: "18",
+                  },
+                ],
+              },
+            };
+          }
+
+          if (path === "bticino_myhome/configuration/device_delete") {
+            return { devices: { light: {}, cover: {}, climate: {}, sensor: {} } };
+          }
+
+          return {
+            devices: {
+              light: [
+                {
+                  key: "discovered_light_11",
+                  name: "Light 11",
+                  where: "11",
+                  dimmable: false,
+                },
+              ],
+              cover: [],
+              climate: [],
+              sensor: [
+                {
+                  key: "discovered_power_51",
+                  name: "Electricite",
+                  where: "51",
+                  class: "power",
+                  unit_scale: "kilo",
+                  who: "18",
+                },
+                {
+                  key: "discovered_power_53",
+                  name: "Eau froide",
+                  where: "53",
+                  class: "water",
+                  unit_scale: "base",
+                  who: "18",
+                },
+              ],
+            },
+          };
+        }
+
+        if (path === "bticino_myhome/activation_discovery") {
+          return {
+            gateway: "aa:bb:cc:dd:ee:ff",
+            enabled: true,
+            new_light: [],
+            new_cover: [],
+            new_climate: [],
+            new_power: ["54"],
+          };
+        }
+
+        if (path === "bticino_myhome/energy/import_daily") {
+          return {
+            imported: [{ rows: 12 }],
+            errors: [],
+          };
+        }
+
+        return {};
+      };
+
+      panel.hass = {
+        callApi: mockApi,
+      };
+    </script>
+  </body>
+</html>

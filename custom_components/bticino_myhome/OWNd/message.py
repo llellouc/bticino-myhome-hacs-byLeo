@@ -1466,7 +1466,7 @@ class OWNEnergyEvent(OWNEvent):
             elif self._dimension == 52:
                 self._type = MESSAGE_TYPE_MONTHLY_CONSUMPTION
                 _message_date = datetime.date(
-                    int(f"20{self._dimension_param[0]}"), self._dimension_param[1], 1
+                    int(f"20{self._dimension_param[0]}"), int(self._dimension_param[1]), 1
                 )
                 self._monthly_consumption["date"] = _message_date
                 self._monthly_consumption["value"] = int(self._dimension_value[0])

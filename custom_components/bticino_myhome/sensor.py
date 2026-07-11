@@ -23,6 +23,8 @@ from homeassistant.const import (
     UnitOfPower,
     UnitOfEnergy,
     UnitOfTemperature,
+    UnitOfVolume,
+    UnitOfVolumeFlowRate,
 )
 from homeassistant.helpers import entity_platform
 from homeassistant.helpers import entity_registry as er
@@ -46,6 +48,7 @@ from .const import (
     CONF_PLATFORMS,
     CONF_ENTITY,
     CONF_DEVICE_CLASS,
+    CONF_UNIT_SCALE,
     CONF_DEVICE_MODEL,
     CONF_MANUFACTURER,
     CONF_WHERE,
@@ -54,6 +57,14 @@ from .const import (
     LOGGER,
 )
 from .gateway import MyHOMEGatewayHandler
+from .helpers.sensor_helpers import (
+    get_required_entities,
+    is_energy_sensor,
+    is_illuminance_sensor,
+    is_power_class,
+    is_temperature_sensor,
+    is_water_sensor,
+)
 from .myhome_device import MyHOMEEntity
 
 SCAN_INTERVAL = timedelta(seconds=60)
@@ -77,19 +88,13 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
     _power_devices_configured = False
 
     for _sensor in _configured_sensors.keys():
-        if (
-            _configured_sensors[_sensor][CONF_DEVICE_CLASS] == SensorDeviceClass.POWER
-            or _configured_sensors[_sensor][CONF_DEVICE_CLASS]
-            == SensorDeviceClass.ENERGY
-        ):
-            _required_entities = list(
-                _configured_sensors[_sensor][CONF_ENTITIES].keys()
-            )
+        _sensor_config = _configured_sensors[_sensor]
+        _device_class = _sensor_config[CONF_DEVICE_CLASS]
 
-            if (
-                _configured_sensors[_sensor][CONF_DEVICE_CLASS]
-                == SensorDeviceClass.POWER
-            ):
+        if is_energy_sensor(_device_class):
+            _required_entities = get_required_entities(_sensor_config)
+
+            if is_power_class(_device_class):
                 _power_devices_configured = True
 
                 ent_reg = er.async_get(hass)
@@ -113,69 +118,106 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
                     MyHOMEPowerSensor(
                         hass=hass,
                         device_id=_sensor,
-                        who=_configured_sensors[_sensor][CONF_WHO],
-                        where=_configured_sensors[_sensor][CONF_WHERE],
-                        name=_configured_sensors[_sensor][CONF_NAME],
-                        device_class=_configured_sensors[_sensor][CONF_DEVICE_CLASS],
-                        manufacturer=_configured_sensors[_sensor][CONF_MANUFACTURER],
-                        model=_configured_sensors[_sensor][CONF_DEVICE_MODEL],
+                        who=_sensor_config[CONF_WHO],
+                        where=_sensor_config[CONF_WHERE],
+                        name=_sensor_config[CONF_NAME],
+                        device_class=_device_class,
+                        manufacturer=_sensor_config[CONF_MANUFACTURER],
+                        model=_sensor_config[CONF_DEVICE_MODEL],
+                        unit_scale=_sensor_config.get(CONF_UNIT_SCALE, "base"),
                         gateway=hass.data[DOMAIN][config_entry.data[CONF_MAC]][
                             CONF_ENTITY
                         ],
                     )
                 )
-                _required_entities.remove(SensorDeviceClass.POWER)
+                if SensorDeviceClass.POWER in _required_entities:
+                    _required_entities.remove(SensorDeviceClass.POWER)
 
             for entity_specific_id in _required_entities:
                 _sensors.append(
                     MyHOMEEnergySensor(
                         hass=hass,
                         device_id=_sensor,
-                        who=_configured_sensors[_sensor][CONF_WHO],
-                        where=_configured_sensors[_sensor][CONF_WHERE],
-                        name=_configured_sensors[_sensor][CONF_NAME],
+                        who=_sensor_config[CONF_WHO],
+                        where=_sensor_config[CONF_WHERE],
+                        name=_sensor_config[CONF_NAME],
                         entity_specific_id=entity_specific_id,
                         device_class=SensorDeviceClass.ENERGY,
-                        manufacturer=_configured_sensors[_sensor][CONF_MANUFACTURER],
-                        model=_configured_sensors[_sensor][CONF_DEVICE_MODEL],
+                        unit_scale=_sensor_config.get(CONF_UNIT_SCALE, "base"),
+                        manufacturer=_sensor_config[CONF_MANUFACTURER],
+                        model=_sensor_config[CONF_DEVICE_MODEL],
                         gateway=hass.data[DOMAIN][config_entry.data[CONF_MAC]][
                             CONF_ENTITY
                         ],
                     )
                 )
 
-        elif (
-            _configured_sensors[_sensor][CONF_DEVICE_CLASS]
-            == SensorDeviceClass.TEMPERATURE
-        ):
+        elif is_water_sensor(_device_class):
+            _power_devices_configured = True
+            _required_entities = get_required_entities(_sensor_config)
+
+            _sensors.append(
+                MyHOMEWaterFlowSensor(
+                    hass=hass,
+                    device_id=_sensor,
+                    who=_sensor_config[CONF_WHO],
+                    where=_sensor_config[CONF_WHERE],
+                    name=_sensor_config[CONF_NAME],
+                    unit_scale=_sensor_config.get(CONF_UNIT_SCALE, "base"),
+                    manufacturer=_sensor_config[CONF_MANUFACTURER],
+                    model=_sensor_config[CONF_DEVICE_MODEL],
+                    gateway=hass.data[DOMAIN][config_entry.data[CONF_MAC]][
+                        CONF_ENTITY
+                    ],
+                )
+            )
+            if SensorDeviceClass.WATER in _required_entities:
+                _required_entities.remove(SensorDeviceClass.WATER)
+
+            for entity_specific_id in _required_entities:
+                _sensors.append(
+                    MyHOMEWaterVolumeSensor(
+                        hass=hass,
+                        device_id=_sensor,
+                        who=_sensor_config[CONF_WHO],
+                        where=_sensor_config[CONF_WHERE],
+                        name=_sensor_config[CONF_NAME],
+                        entity_specific_id=entity_specific_id,
+                        unit_scale=_sensor_config.get(CONF_UNIT_SCALE, "base"),
+                        manufacturer=_sensor_config[CONF_MANUFACTURER],
+                        model=_sensor_config[CONF_DEVICE_MODEL],
+                        gateway=hass.data[DOMAIN][config_entry.data[CONF_MAC]][
+                            CONF_ENTITY
+                        ],
+                    )
+                )
+
+        elif is_temperature_sensor(_device_class):
             _sensors.append(
                 MyHOMETemperatureSensor(
                     hass=hass,
                     device_id=_sensor,
-                    who=_configured_sensors[_sensor][CONF_WHO],
-                    where=_configured_sensors[_sensor][CONF_WHERE],
-                    name=_configured_sensors[_sensor][CONF_NAME],
-                    device_class=_configured_sensors[_sensor][CONF_DEVICE_CLASS],
-                    manufacturer=_configured_sensors[_sensor][CONF_MANUFACTURER],
-                    model=_configured_sensors[_sensor][CONF_DEVICE_MODEL],
+                    who=_sensor_config[CONF_WHO],
+                    where=_sensor_config[CONF_WHERE],
+                    name=_sensor_config[CONF_NAME],
+                    device_class=_device_class,
+                    manufacturer=_sensor_config[CONF_MANUFACTURER],
+                    model=_sensor_config[CONF_DEVICE_MODEL],
                     gateway=hass.data[DOMAIN][config_entry.data[CONF_MAC]][CONF_ENTITY],
                 )
             )
 
-        elif (
-            _configured_sensors[_sensor][CONF_DEVICE_CLASS]
-            == SensorDeviceClass.ILLUMINANCE
-        ):
+        elif is_illuminance_sensor(_device_class):
             _sensors.append(
                 MyHOMEIlluminanceSensor(
                     hass=hass,
                     device_id=_sensor,
-                    who=_configured_sensors[_sensor][CONF_WHO],
-                    where=_configured_sensors[_sensor][CONF_WHERE],
-                    name=_configured_sensors[_sensor][CONF_NAME],
-                    device_class=_configured_sensors[_sensor][CONF_DEVICE_CLASS],
-                    manufacturer=_configured_sensors[_sensor][CONF_MANUFACTURER],
-                    model=_configured_sensors[_sensor][CONF_DEVICE_MODEL],
+                    who=_sensor_config[CONF_WHO],
+                    where=_sensor_config[CONF_WHERE],
+                    name=_sensor_config[CONF_NAME],
+                    device_class=_device_class,
+                    manufacturer=_sensor_config[CONF_MANUFACTURER],
+                    model=_sensor_config[CONF_DEVICE_MODEL],
                     gateway=hass.data[DOMAIN][config_entry.data[CONF_MAC]][CONF_ENTITY],
                 )
             )
@@ -215,6 +257,7 @@ class MyHOMEPowerSensor(MyHOMEEntity, SensorEntity):
         who: str,
         where: str,
         device_class: str,
+        unit_scale: str,
         manufacturer: str,
         model: str,
         gateway: MyHOMEGatewayHandler,
@@ -235,10 +278,15 @@ class MyHOMEPowerSensor(MyHOMEEntity, SensorEntity):
         self._attr_name = f"{name} {self._entity_specific_name}"
 
         self._attr_device_class = device_class
+        self._unit_scale = unit_scale
         self._attr_unique_id = (
             f"{gateway.mac}-{self._device_id}-{self._attr_device_class}"
         )
-        self._attr_native_unit_of_measurement = UnitOfPower.WATT
+        self._attr_native_unit_of_measurement = (
+            UnitOfPower.KILO_WATT
+            if self._unit_scale == "kilo"
+            else UnitOfPower.WATT
+        )
         self._attr_state_class = SensorStateClass.MEASUREMENT
 
         self._attr_native_value = None
@@ -282,7 +330,11 @@ class MyHOMEPowerSensor(MyHOMEEntity, SensorEntity):
             self._gateway_handler.log_id,
             message.human_readable_log,
         )
-        self._attr_native_value = message.active_power
+        self._attr_native_value = (
+            round(message.active_power / 1000, 3)
+            if self._unit_scale == "kilo"
+            else message.active_power
+        )
         self.async_schedule_update_ha_state()
 
     async def start_sending_instant_power(self, duration):
@@ -302,6 +354,7 @@ class MyHOMEEnergySensor(MyHOMEEntity, SensorEntity):
         where: str,
         entity_specific_id: str,
         device_class: str,
+        unit_scale: str,
         manufacturer: str,
         model: str,
         gateway: MyHOMEGatewayHandler,
@@ -334,7 +387,12 @@ class MyHOMEEnergySensor(MyHOMEEntity, SensorEntity):
             f"{gateway.mac}-{self._device_id}-{self._entity_specific_id}"
         )
         self._attr_device_class = device_class
-        self._attr_native_unit_of_measurement = UnitOfEnergy.WATT_HOUR
+        self._unit_scale = unit_scale
+        self._attr_native_unit_of_measurement = (
+            UnitOfEnergy.KILO_WATT_HOUR
+            if self._unit_scale == "kilo"
+            else UnitOfEnergy.WATT_HOUR
+        )
         self._attr_state_class = SensorStateClass.TOTAL_INCREASING
         self._attr_should_poll = True
         self._attr_native_value = None
@@ -397,7 +455,10 @@ class MyHOMEEnergySensor(MyHOMEEntity, SensorEntity):
                 self._gateway_handler.log_id,
                 message.human_readable_log,
             )
-            self._attr_native_value = message.total_consumption
+            value = message.total_consumption
+            self._attr_native_value = (
+                round(value / 1000, 3) if self._unit_scale == "kilo" else value
+            )
         elif (
             self._entity_specific_id == "monthly-energy"
             and message.message_type == MESSAGE_TYPE_CURRENT_MONTH_CONSUMPTION
@@ -407,7 +468,10 @@ class MyHOMEEnergySensor(MyHOMEEntity, SensorEntity):
                 self._gateway_handler.log_id,
                 message.human_readable_log,
             )
-            self._attr_native_value = message.current_month_partial_consumption
+            value = message.current_month_partial_consumption
+            self._attr_native_value = (
+                round(value / 1000, 3) if self._unit_scale == "kilo" else value
+            )
         elif (
             self._entity_specific_id == "daily-energy"
             and message.message_type == MESSAGE_TYPE_CURRENT_DAY_CONSUMPTION
@@ -417,7 +481,247 @@ class MyHOMEEnergySensor(MyHOMEEntity, SensorEntity):
                 self._gateway_handler.log_id,
                 message.human_readable_log,
             )
-            self._attr_native_value = message.current_day_partial_consumption
+            value = message.current_day_partial_consumption
+            self._attr_native_value = (
+                round(value / 1000, 3) if self._unit_scale == "kilo" else value
+            )
+        self.async_schedule_update_ha_state()
+
+
+class MyHOMEWaterFlowSensor(MyHOMEEntity, SensorEntity):
+    def __init__(
+        self,
+        hass,
+        name: str,
+        device_id: str,
+        who: str,
+        where: str,
+        unit_scale: str,
+        manufacturer: str,
+        model: str,
+        gateway: MyHOMEGatewayHandler,
+    ) -> None:
+        super().__init__(
+            hass=hass,
+            name=name,
+            platform=PLATFORM,
+            device_id=device_id,
+            who=who,
+            where=where,
+            manufacturer=manufacturer,
+            model=model,
+            gateway=gateway,
+        )
+
+        self._entity_specific_name = "Flow"
+        self._attr_name = f"{name} {self._entity_specific_name}"
+
+        self._attr_device_class = SensorDeviceClass.VOLUME_FLOW_RATE
+        self._unit_scale = unit_scale
+        self._attr_unique_id = (
+            f"{gateway.mac}-{self._device_id}-{SensorDeviceClass.WATER}"
+        )
+        self._attr_native_unit_of_measurement = (
+            getattr(UnitOfVolumeFlowRate, "CUBIC_METERS_PER_HOUR", "m3/h")
+            if self._unit_scale == "kilo"
+            else UnitOfVolumeFlowRate.LITERS_PER_HOUR
+        )
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+
+        self._attr_native_value = None
+        self._attr_extra_state_attributes = {
+            "Sensor": f"({self._where[0]}){self._where[1:]}"
+        }
+
+    async def async_added_to_hass(self):
+        """When entity is added to hass."""
+        self._hass.data[DOMAIN][self._gateway_handler.mac][CONF_PLATFORMS][
+            self._platform
+        ][self._device_id][CONF_ENTITIES][SensorDeviceClass.WATER] = self
+        await self.async_update()
+
+    async def async_will_remove_from_hass(self):
+        """When entity is removed from hass."""
+        if (
+            SensorDeviceClass.WATER
+            in self._hass.data[DOMAIN][self._gateway_handler.mac][CONF_PLATFORMS][
+                self._platform
+            ][self._device_id][CONF_ENTITIES]
+        ):
+            del self._hass.data[DOMAIN][self._gateway_handler.mac][CONF_PLATFORMS][
+                self._platform
+            ][self._device_id][CONF_ENTITIES][SensorDeviceClass.WATER]
+
+    async def async_update(self):
+        """Update the entity.
+
+        Only used by the generic entity update service.
+        """
+
+    def handle_event(self, message: OWNEnergyEvent):
+        """Handle an event message."""
+        if message.message_type not in [MESSAGE_TYPE_ACTIVE_POWER]:
+            return True
+
+        LOGGER.debug(
+            "%s %s",
+            self._gateway_handler.log_id,
+            message.human_readable_log,
+        )
+        self._attr_native_value = (
+            round(message.active_power / 1000, 4)
+            if self._unit_scale == "kilo"
+            else message.active_power
+        )
+        self.async_schedule_update_ha_state()
+
+    async def start_sending_instant_power(self, duration):
+        """Request automatic instant flow data."""
+        await self._gateway_handler.send(
+            OWNEnergyCommand.start_sending_instant_power(self._where, duration)
+        )
+
+
+class MyHOMEWaterVolumeSensor(MyHOMEEntity, SensorEntity):
+    def __init__(
+        self,
+        hass,
+        name: str,
+        device_id: str,
+        who: str,
+        where: str,
+        entity_specific_id: str,
+        unit_scale: str,
+        manufacturer: str,
+        model: str,
+        gateway: MyHOMEGatewayHandler,
+    ) -> None:
+        super().__init__(
+            hass=hass,
+            name=name,
+            platform=PLATFORM,
+            device_id=device_id,
+            who=who,
+            where=where,
+            manufacturer=manufacturer,
+            model=model,
+            gateway=gateway,
+        )
+
+        self._entity_specific_id = entity_specific_id
+        if self._entity_specific_id == "daily-water":
+            self._entity_specific_name = "Volume (today)"
+            self._attr_entity_registry_enabled_default = False
+        elif self._entity_specific_id == "monthly-water":
+            self._entity_specific_name = "Volume (current month)"
+            self._attr_entity_registry_enabled_default = False
+        elif self._entity_specific_id == "total-water":
+            self._entity_specific_name = "Volume"
+            self._attr_entity_registry_enabled_default = True
+        self._attr_name = f"{name} {self._entity_specific_name}"
+
+        self._attr_unique_id = (
+            f"{gateway.mac}-{self._device_id}-{self._entity_specific_id}"
+        )
+        self._attr_device_class = SensorDeviceClass.WATER
+        self._unit_scale = unit_scale
+        self._attr_native_unit_of_measurement = (
+            UnitOfVolume.CUBIC_METERS
+            if self._unit_scale == "kilo"
+            else UnitOfVolume.LITERS
+        )
+        self._attr_state_class = SensorStateClass.TOTAL_INCREASING
+        self._attr_should_poll = True
+        self._attr_native_value = None
+        self._attr_extra_state_attributes = {
+            "Sensor": f"({self._where[0]}){self._where[1:]}"
+        }
+
+    async def async_added_to_hass(self):
+        """When entity is added to hass."""
+        self._hass.data[DOMAIN][self._gateway_handler.mac][CONF_PLATFORMS][
+            self._platform
+        ][self._device_id][CONF_ENTITIES][self._entity_specific_id] = self
+        await self.async_update()
+
+    async def async_will_remove_from_hass(self):
+        """When entity is removed from hass."""
+        if (
+            self._entity_specific_id
+            in self._hass.data[DOMAIN][self._gateway_handler.mac][CONF_PLATFORMS][
+                self._platform
+            ][self._device_id][CONF_ENTITIES]
+        ):
+            del self._hass.data[DOMAIN][self._gateway_handler.mac][CONF_PLATFORMS][
+                self._platform
+            ][self._device_id][CONF_ENTITIES][self._entity_specific_id]
+
+    async def async_update(self):
+        """Update the entity.
+
+        Only used by the generic entity update service.
+        """
+        if self._entity_specific_id == "total-water":
+            await self._gateway_handler.send_status_request(
+                OWNEnergyCommand.get_total_consumption(self._where)
+            )
+        elif self._entity_specific_id == "monthly-water":
+            await self._gateway_handler.send_status_request(
+                OWNEnergyCommand.get_partial_monthly_consumption(self._where)
+            )
+        elif self._entity_specific_id == "daily-water":
+            await self._gateway_handler.send_status_request(
+                OWNEnergyCommand.get_partial_daily_consumption(self._where)
+            )
+
+    def handle_event(self, message: OWNEnergyEvent):
+        """Handle an event message."""
+        if message.message_type not in [
+            MESSAGE_TYPE_ENERGY_TOTALIZER,
+            MESSAGE_TYPE_CURRENT_MONTH_CONSUMPTION,
+            MESSAGE_TYPE_CURRENT_DAY_CONSUMPTION,
+        ]:
+            return True
+
+        if (
+            self._entity_specific_id == "total-water"
+            and message.message_type == MESSAGE_TYPE_ENERGY_TOTALIZER
+        ):
+            LOGGER.debug(
+                "%s %s",
+                self._gateway_handler.log_id,
+                message.human_readable_log,
+            )
+            value = message.total_consumption
+            self._attr_native_value = (
+                round(value / 1000, 4) if self._unit_scale == "kilo" else value
+            )
+        elif (
+            self._entity_specific_id == "monthly-water"
+            and message.message_type == MESSAGE_TYPE_CURRENT_MONTH_CONSUMPTION
+        ):
+            LOGGER.debug(
+                "%s %s",
+                self._gateway_handler.log_id,
+                message.human_readable_log,
+            )
+            value = message.current_month_partial_consumption
+            self._attr_native_value = (
+                round(value / 1000, 4) if self._unit_scale == "kilo" else value
+            )
+        elif (
+            self._entity_specific_id == "daily-water"
+            and message.message_type == MESSAGE_TYPE_CURRENT_DAY_CONSUMPTION
+        ):
+            LOGGER.debug(
+                "%s %s",
+                self._gateway_handler.log_id,
+                message.human_readable_log,
+            )
+            value = message.current_day_partial_consumption
+            self._attr_native_value = (
+                round(value / 1000, 4) if self._unit_scale == "kilo" else value
+            )
         self.async_schedule_update_ha_state()
 
 

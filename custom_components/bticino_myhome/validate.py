@@ -45,6 +45,7 @@ from .const import (
     CONF_MANUFACTURER,
     CONF_DEVICE_MODEL,
     CONF_DEVICE_CLASS,
+    CONF_UNIT_SCALE,
     CONF_DIMMABLE,
     CONF_ADVANCED_SHUTTER,
     CONF_INVERTED,
@@ -249,16 +250,27 @@ class MyHomeSensorSchema(Schema):
                 if data[device][CONF_DEVICE_CLASS] in [
                     SensorDeviceClass.POWER,
                     SensorDeviceClass.ENERGY,
+                    "power_energy",
                 ]:
                     if CONF_WHO not in data[device]:
                         data[device][CONF_WHO] = "18"
                     elif data[device][CONF_WHO] != "18":
                         raise Invalid("invalid sensor class for selected who")
-                    data[device][CONF_ENTITIES][f"daily-{SensorDeviceClass.ENERGY}"] = {}
-                    data[device][CONF_ENTITIES][f"monthly-{SensorDeviceClass.ENERGY}"] = {}
-                    data[device][CONF_ENTITIES][f"total-{SensorDeviceClass.ENERGY}"] = {}
-                    if data[device][CONF_DEVICE_CLASS] in [SensorDeviceClass.POWER]:
+                    if data[device][CONF_DEVICE_CLASS] in [SensorDeviceClass.ENERGY, "power_energy"]:
+                        data[device][CONF_ENTITIES][f"daily-{SensorDeviceClass.ENERGY}"] = {}
+                        data[device][CONF_ENTITIES][f"monthly-{SensorDeviceClass.ENERGY}"] = {}
+                        data[device][CONF_ENTITIES][f"total-{SensorDeviceClass.ENERGY}"] = {}
+                    if data[device][CONF_DEVICE_CLASS] in [SensorDeviceClass.POWER, "power_energy"]:
                         data[device][CONF_ENTITIES][f"{SensorDeviceClass.POWER}"] = {}
+                elif data[device][CONF_DEVICE_CLASS] in [SensorDeviceClass.WATER]:
+                    if CONF_WHO not in data[device]:
+                        data[device][CONF_WHO] = "18"
+                    elif data[device][CONF_WHO] != "18":
+                        raise Invalid("invalid sensor class for selected who")
+                    data[device][CONF_ENTITIES][f"daily-{SensorDeviceClass.WATER}"] = {}
+                    data[device][CONF_ENTITIES][f"monthly-{SensorDeviceClass.WATER}"] = {}
+                    data[device][CONF_ENTITIES][f"total-{SensorDeviceClass.WATER}"] = {}
+                    data[device][CONF_ENTITIES][f"{SensorDeviceClass.WATER}"] = {}
                 elif data[device][CONF_DEVICE_CLASS] in [SensorDeviceClass.TEMPERATURE]:
                     if CONF_WHO not in data[device]:
                         data[device][CONF_WHO] = "4"
@@ -395,9 +407,12 @@ sensor_schema = MyHomeSensorSchema(
                     SensorDeviceClass.TEMPERATURE,
                     SensorDeviceClass.POWER,
                     SensorDeviceClass.ENERGY,
+                    "power_energy",
+                    SensorDeviceClass.WATER,
                     SensorDeviceClass.ILLUMINANCE,
                 ]
             ),
+            Optional(CONF_UNIT_SCALE, default="base"): In(["base", "kilo"]),
             Optional(CONF_MANUFACTURER, default="BTicino S.p.A."): str,
             Optional(CONF_DEVICE_MODEL): Coerce(str),
         }

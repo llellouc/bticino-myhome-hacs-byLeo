@@ -2,7 +2,8 @@
 import asyncio
 import logging
 import re
-from typing import Dict, List
+from datetime import date
+from typing import Any, Callable, Dict, List
 
 from homeassistant.const import (
     CONF_ENTITIES,
@@ -153,6 +154,7 @@ class MyHOMEGatewayHandler:
             "climate": set(),
             "power": set(),
         }
+        self._energy_waiters: list[tuple[Callable[[OWNEnergyEvent], bool], asyncio.Queue]] = []
         self._discovery_log_filter = DiscoverySendErrorDowngradeFilter(self)
         LOGGER.addFilter(self._discovery_log_filter)
 
@@ -292,6 +294,128 @@ class MyHOMEGatewayHandler:
             where = self._extract_energy_where(message)
             if where is not None:
                 self._activation_discovery_results["power"].add(where)
+
+    def _notify_energy_waiters(self, message: OWNEnergyEvent):
+        """Push energy events to temporary waiters used by history import."""
+        for matcher, queue in list(self._energy_waiters):
+            try:
+                if matcher(message):
+                    queue.put_nowait(message)
+            except Exception:  # pylint: disable=broad-except
+                continue
+
+    @staticmethod
+    def _iter_recent_months(months_back: int) -> list[tuple[int, int]]:
+        months: list[tuple[int, int]] = []
+        today = date.today()
+        year = today.year
+        month = today.month
+
+        for _ in range(max(1, months_back)):
+            months.append((year, month))
+            month -= 1
+            if month == 0:
+                month = 12
+                year -= 1
+
+        months.reverse()
+        return months
+
+    async def _collect_energy_events(
+        self,
+        command: OWNCommand,
+        matcher: Callable[[OWNEnergyEvent], bool],
+        first_timeout: float = 3.0,
+        idle_timeout: float = 0.7,
+        max_timeout: float = 8.0,
+        retries: int = 2,
+        retry_delay: float = 0.8,
+    ) -> list[OWNEnergyEvent]:
+        for attempt in range(retries + 1):
+            queue: asyncio.Queue = asyncio.Queue()
+            self._energy_waiters.append((matcher, queue))
+            results: list[OWNEnergyEvent] = []
+
+            try:
+                await self.send_status_request(command)
+
+                loop = asyncio.get_running_loop()
+                start = loop.time()
+
+                try:
+                    first = await asyncio.wait_for(queue.get(), timeout=first_timeout)
+                    results.append(first)
+                except asyncio.TimeoutError:
+                    if attempt < retries:
+                        await asyncio.sleep(retry_delay)
+                        continue
+                    return results
+
+                while (loop.time() - start) < max_timeout:
+                    try:
+                        item = await asyncio.wait_for(queue.get(), timeout=idle_timeout)
+                        results.append(item)
+                    except asyncio.TimeoutError:
+                        break
+
+                return results
+            finally:
+                try:
+                    self._energy_waiters.remove((matcher, queue))
+                except ValueError:
+                    pass
+
+        return []
+
+    async def fetch_daily_history(
+        self,
+        where: str,
+        months_back: int = 24,
+        query_delay: float = 0.2,
+    ) -> list[dict[str, Any]]:
+        """Fetch daily consumption history from gateway for one energy endpoint."""
+        where = str(where)
+        all_rows: list[dict[str, Any]] = []
+        seen_dates: set[str] = set()
+
+        for year, month in self._iter_recent_months(months_back):
+            command = OWNEnergyCommand.get_daily_consumption(where, year, month)
+            if command is None:
+                continue
+
+            def _matcher(msg: OWNEnergyEvent, expected_where: str = where):
+                return (
+                    msg.message_type == "daily_consumption"
+                    and self._extract_energy_where(msg) == expected_where
+                    and bool(msg.daily_consumption)
+                    and "date" in msg.daily_consumption
+                    and "value" in msg.daily_consumption
+                )
+
+            month_rows = await self._collect_energy_events(
+                command=command,
+                matcher=_matcher,
+            )
+
+            for row in month_rows:
+                item_date = row.daily_consumption["date"]
+                item_value = row.daily_consumption["value"]
+                date_key = item_date.isoformat()
+                if date_key in seen_dates:
+                    continue
+                seen_dates.add(date_key)
+                all_rows.append(
+                    {
+                        "date": item_date,
+                        "value": item_value,
+                    }
+                )
+
+            # Avoid saturating gateway command queue during bulk imports.
+            await asyncio.sleep(max(0.0, query_delay))
+
+        all_rows.sort(key=lambda item: item["date"])
+        return all_rows
 
     @staticmethod
     def _extract_energy_where(message: OWNEnergyEvent) -> str | None:
@@ -544,6 +668,7 @@ class MyHOMEGatewayHandler:
                             message,
                         )
                     elif isinstance(message, OWNEnergyEvent):
+                        self._notify_energy_waiters(message)
                         if SENSOR in self.hass.data[DOMAIN][self.mac][CONF_PLATFORMS] and message.entity in self.hass.data[DOMAIN][self.mac][CONF_PLATFORMS][SENSOR]:
                             for _entity in self.hass.data[DOMAIN][self.mac][CONF_PLATFORMS][SENSOR][message.entity][CONF_ENTITIES]:
                                 if isinstance(
