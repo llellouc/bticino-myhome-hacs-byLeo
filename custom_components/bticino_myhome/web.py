@@ -599,13 +599,29 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
         return "total-water" if sensor_class == "water" else "total-energy"
 
     @staticmethod
-    def _resolve_entity_statistic_id(hass, gateway: str, sensor_key: str, sensor_class: str) -> str | None:
-        """Resolve the recorder statistic id used by the HA entity."""
+    def _resolve_entity_statistic_id(hass, gateway: str, sensor_key: str, sensor_class: str, where: str = None) -> str | None:
+        """Resolve the recorder statistic id used by the HA entity.
+        
+        Try current schema first, then fall back to old schema using WHO and WHERE.
+        """
         entity_registry = er.async_get(hass)
-        unique_id = f"{gateway}-{sensor_key}-{MyHOMEImportDailyEnergyHistoryView._target_entity_suffix(sensor_class)}"
+        suffix = MyHOMEImportDailyEnergyHistoryView._target_entity_suffix(sensor_class)
+        
+        # Try current schema: {gateway}-{sensor_key}-{suffix}
+        unique_id = f"{gateway}-{sensor_key}-{suffix}"
         entity_id = entity_registry.async_get_entity_id("sensor", DOMAIN, unique_id)
         if entity_id:
             return entity_id
+        
+        # Fall back to old schema: {gateway}-{who}-{where}-{suffix}
+        # WHO is typically "18" for power/energy sensors, "16" for water
+        if where:
+            who = "18" if sensor_class in ("power", "power_energy", "energy") else "16"
+            old_unique_id = f"{gateway}-{who}-{where}-{suffix}"
+            entity_id = entity_registry.async_get_entity_id("sensor", DOMAIN, old_unique_id)
+            if entity_id:
+                return entity_id
+        
         return None
 
     @staticmethod
@@ -989,6 +1005,7 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
                     gateway,
                     target["sensor_key"],
                     target["class"],
+                    target["where"],
                 )
                 statistic_suffix = sanitize_key(f"daily_{gateway}_{target['class']}_{where}")
                 fallback_statistic_id = f"{DOMAIN}:{statistic_suffix}"

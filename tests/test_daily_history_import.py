@@ -195,3 +195,59 @@ def test_recorder_payload_rejects_invalid_external_statistic_source():
         metadata=metadata,
         statistics_rows=[statistic],
     ) == "external source 'recorder' must match statistic domain 'bticino_myhome'"
+
+
+async def test_power_energy_import_legacy_entity_naming_fallback(
+    async_setup_recorder_instance,
+    hass,
+    configured_import_view,
+    history_rows,
+):
+    """Import resolves legacy entity unique_id pattern when new pattern not found."""
+    from homeassistant.helpers import entity_registry as er
+    from pytest_homeassistant_custom_component.components.recorder.common import (
+        async_recorder_block_till_done,
+    )
+
+    await async_setup_recorder_instance(hass)
+    view, _gateway_handler, config = configured_import_view
+    config["sensor"]["test_sensor"]["class"] = "power_energy"
+    entity_id = "sensor.legacy_energy"
+    entity_registry = er.async_get(hass)
+    
+    # Create entity with legacy naming scheme: {gateway}-{who}-{where}-total-energy
+    where = "51"
+    legacy_unique_id = f"{GATEWAY_MAC}-18-{where}-total-energy"
+    entity_registry.async_get_or_create(
+        "sensor",
+        DOMAIN,
+        legacy_unique_id,
+        suggested_object_id="legacy_energy",
+    )
+    assert entity_registry.async_get_entity_id(
+        "sensor",
+        DOMAIN,
+        legacy_unique_id,
+    ) == entity_id
+
+    request = import_request({"gateway": GATEWAY_MAC, "sensor_key": "test_sensor"})
+    request.app["hass"] = hass
+
+    response = await view.post(request)
+    body = json.loads(response.text)
+
+    assert response.status == 200, body
+    assert body["errors"] == []
+    # Fallback resolution should find the legacy entity
+    assert body["imported"][0]["statistic_id"] == entity_id
+    assert body["imported"][0]["entity_statistic_id"] == entity_id
+    assert body["imported"][0]["persisted_rows"] == 2
+
+    await async_recorder_block_till_done(hass)
+    persisted = await _statistics_rows(
+        hass,
+        entity_id,
+        datetime.combine(history_rows[0]["date"], datetime.min.time(), timezone.utc),
+        datetime.combine(history_rows[-1]["date"], datetime.max.time(), timezone.utc),
+    )
+    assert [row["state"] for row in persisted[entity_id]] == [1500.0, 2500.0]
