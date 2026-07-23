@@ -1,0 +1,11 @@
+services:
+  integration-tests:
+    build:
+      context: .
+      dockerfile: tests/Dockerfile
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+    command: ["pytest", "-q", "tests"]

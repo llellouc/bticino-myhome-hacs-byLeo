@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from http import HTTPStatus
 from json import JSONDecodeError
+from math import isclose
 from pathlib import Path
 from typing import Any
 
@@ -788,6 +789,60 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
 
         return {"start": best_start, "sum": best_sum}
 
+    @staticmethod
+    def _persisted_statistics_count(
+        hass,
+        recorder_statistics,
+        statistic_id: str,
+        statistics_rows,
+    ) -> int:
+        """Count imported rows that Recorder persisted with their expected state."""
+        if not statistics_rows:
+            return 0
+
+        start_at = min(row["start"] for row in statistics_rows)
+        end_at = max(row["start"] for row in statistics_rows) + timedelta(hours=1)
+        try:
+            data = recorder_statistics.statistics_during_period(
+                hass,
+                start_time=start_at,
+                end_time=end_at,
+                statistic_ids=[statistic_id],
+                period="hour",
+                types={"state"},
+            )
+        except TypeError:
+            data = recorder_statistics.statistics_during_period(
+                hass,
+                start_at,
+                end_at,
+                [statistic_id],
+                "hour",
+                None,
+                {"state"},
+            )
+        persisted_rows = data.get(statistic_id) if isinstance(data, dict) else None
+        if not persisted_rows:
+            return 0
+
+        expected_by_start = {
+            row["start"]: float(row["state"])
+            for row in statistics_rows
+        }
+        matched_starts: set[datetime] = set()
+        for row in persisted_rows:
+            if not isinstance(row, dict):
+                continue
+            row_start = row.get("start")
+            row_state = row.get("state")
+            if isinstance(row_start, (int, float)):
+                row_start = datetime.fromtimestamp(float(row_start), tz=timezone.utc)
+            if row_start not in expected_by_start or row_state is None:
+                continue
+            if isclose(float(row_state), expected_by_start[row_start], rel_tol=1e-9, abs_tol=1e-9):
+                matched_starts.add(row_start)
+        return len(matched_starts)
+
     async def post(self, request):
         hass = request.app["hass"]
         try:
@@ -888,7 +943,7 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
 
         def _unit_for_sensor(sensor_class: str, unit_scale: str) -> str:
             if sensor_class == "water":
-                return "m3" if unit_scale == "kilo" else "L"
+                return "m³" if unit_scale == "kilo" else "L"
             return "kWh" if unit_scale == "kilo" else "Wh"
 
         def _unit_class_for_sensor(sensor_class: str) -> str:
@@ -899,6 +954,7 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
         gateway_handler = gateway_data[CONF_ENTITY]
         imported: list[dict[str, Any]] = []
         errors: list[str] = []
+        persistence_checks: list[tuple[dict[str, Any], str, list[Any]]] = []
 
         self._active_gateways.add(gateway)
         try:
@@ -1123,25 +1179,55 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
                         add_imported_stats(hass, metadata, statistics_rows)
                     else:
                         add_external_stats(hass, metadata, statistics_rows)
-                    imported.append(
-                        {
-                            "sensor_key": target["sensor_key"],
-                            "where": where,
-                            "class": target["class"],
-                            "rows": len(statistics_rows),
-                            "statistic_id": statistic_id,
-                            "entity_statistic_id": entity_statistic_id,
-                            "fallback_statistic_id": fallback_statistic_id,
-                            "skipped_partial_days": skipped_partial_days,
-                            "skipped_hourly_days": skipped_hourly_days,
-                            "sum_aligned_to_existing": sum_aligned_to_existing,
-                            "sum_alignment_offset": round(sum_alignment_offset, 6),
-                        }
+                    imported_result = {
+                        "sensor_key": target["sensor_key"],
+                        "where": where,
+                        "class": target["class"],
+                        "rows": len(statistics_rows),
+                        "statistic_id": statistic_id,
+                        "entity_statistic_id": entity_statistic_id,
+                        "fallback_statistic_id": fallback_statistic_id,
+                        "skipped_partial_days": skipped_partial_days,
+                        "skipped_hourly_days": skipped_hourly_days,
+                        "sum_aligned_to_existing": sum_aligned_to_existing,
+                        "sum_alignment_offset": round(sum_alignment_offset, 6),
+                    }
+                    imported.append(imported_result)
+                    persistence_checks.append(
+                        (imported_result, statistic_id, statistics_rows)
                     )
                 except Exception as err:  # pylint: disable=broad-except
                     errors.append(
                         f"{where}: failed to import statistics ({type(err).__name__}: {err})"
                     )
+
+            if persistence_checks:
+                await recorder_instance.async_block_till_done()
+                for imported_result, statistic_id, statistics_rows in persistence_checks:
+                    try:
+                        persisted_rows = await recorder_instance.async_add_executor_job(
+                            self._persisted_statistics_count,
+                            hass,
+                            recorder_statistics,
+                            statistic_id,
+                            statistics_rows,
+                        )
+                    except Exception as err:  # pylint: disable=broad-except
+                        errors.append(
+                            f"{imported_result['where']}: failed to verify persisted statistics "
+                            f"({type(err).__name__}: {err})"
+                        )
+                        imported_result["rows"] = 0
+                        continue
+
+                    imported_result["persisted_rows"] = persisted_rows
+                    expected_rows = len(statistics_rows)
+                    if persisted_rows != expected_rows:
+                        errors.append(
+                            f"{imported_result['where']}: Recorder persisted "
+                            f"{persisted_rows}/{expected_rows} statistics rows for {statistic_id}"
+                        )
+                        imported_result["rows"] = persisted_rows
 
             response_status = HTTPStatus.OK if len(errors) == 0 else HTTPStatus.INTERNAL_SERVER_ERROR
             return self.json(

@@ -228,9 +228,15 @@ export async function runImportForModal(panel) {
       query_delay_ms: 200,
     });
     const importedCount = (response.imported || []).reduce((acc, item) => acc + (item.rows || 0), 0);
+    const statisticIds = [...new Set(
+      (response.imported || [])
+        .map((item) => item.statistic_id)
+        .filter((statisticId) => typeof statisticId === "string" && statisticId.length > 0),
+    )];
+    const target = statisticIds.length > 0 ? ` Target: ${statisticIds.join(", ")}.` : "";
     panel._importModal = {
       ...panel._importModal,
-      result: `Import terminé : ${importedCount} point(s) importé(s).`,
+      result: `Import complete: ${importedCount} point(s) persisted.${target}`,
       error: (response.errors || []).length > 0 ? response.errors.join(" | ") : null,
     };
   } catch (err) {
