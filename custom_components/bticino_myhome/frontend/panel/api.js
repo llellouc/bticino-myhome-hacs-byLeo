@@ -224,6 +224,7 @@ export async function runImportForModal(panel) {
       gateway: panel._state.gateway,
       sensor_key: panel._importModal.key,
       overwrite: !!panel._importModal.overwrite,
+      allow_external_fallback: false,
       months_back: panel._importModal.monthsBack,
       query_delay_ms: 200,
     });
@@ -240,9 +241,13 @@ export async function runImportForModal(panel) {
       error: (response.errors || []).length > 0 ? response.errors.join(" | ") : null,
     };
   } catch (err) {
+    const detailedErrors = err?.body?.errors;
+    const detailedMessage = Array.isArray(detailedErrors) && detailedErrors.length > 0
+      ? detailedErrors.join(" | ")
+      : null;
     panel._importModal = {
       ...panel._importModal,
-      error: err?.body?.message || err?.message || "Import échoué.",
+      error: detailedMessage || err?.body?.message || err?.message || "Import failed.",
     };
   } finally {
     panel._importInProgress = false;

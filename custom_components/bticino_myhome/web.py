@@ -913,6 +913,7 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
         months_back = to_int(payload.get("months_back"), 24)
         months_back = max(1, min(24, months_back))
         overwrite = to_bool(payload.get("overwrite"), False)
+        allow_external_fallback = to_bool(payload.get("allow_external_fallback"), False)
         query_delay_ms = to_int(payload.get("query_delay_ms"), 200)
         query_delay_ms = max(0, min(2000, query_delay_ms))
         query_delay = query_delay_ms / 1000.0
@@ -1009,6 +1010,24 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
                 )
                 statistic_suffix = sanitize_key(f"daily_{gateway}_{target['class']}_{where}")
                 fallback_statistic_id = f"{DOMAIN}:{statistic_suffix}"
+                if entity_statistic_id is None and not allow_external_fallback:
+                    errors.append(
+                        f"{where}: entity statistic id not found for sensor key "
+                        f"'{target['sensor_key']}' (expected unique_id suffix "
+                        f"'{self._target_entity_suffix(target['class'])}'). Import skipped."
+                    )
+                    imported.append(
+                        {
+                            "sensor_key": target["sensor_key"],
+                            "where": where,
+                            "class": target["class"],
+                            "rows": 0,
+                            "statistic_id": None,
+                            "entity_statistic_id": None,
+                            "fallback_statistic_id": fallback_statistic_id,
+                        }
+                    )
+                    continue
                 statistic_id = entity_statistic_id or fallback_statistic_id
                 unit = _unit_for_sensor(target["class"], target["unit_scale"])
 
@@ -1038,6 +1057,7 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
 
                 skipped_partial_days = len(source_rows) - len(filtered_rows)
                 skipped_hourly_days = 0
+                skipped_zero_days = 0
 
                 if filtered_rows:
                     first_day = filtered_rows[0]["date"]
@@ -1066,6 +1086,9 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
                     value = float(row["value"])
                     if target["unit_scale"] == "kilo":
                         value = value / 1000.0
+                    if isclose(value, 0.0, rel_tol=0.0, abs_tol=1e-9):
+                        skipped_zero_days += 1
+                        continue
 
                     day_values.append((day, value))
 
@@ -1147,7 +1170,29 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
                                 imported_total = sum(value for _day, value in rows_to_import)
                                 sum_alignment_offset = first_existing_value - imported_total
                                 sum_aligned_to_existing = True
+                        else:
+                            # No recorder statistics at all (before or after the
+                            # imported window): anchor on the entity's current
+                            # live reading and reconstruct history backward from
+                            # "today's cumulative total minus each imported day's
+                            # consumption" instead of starting the series near 0.
+                            live_state = hass.states.get(entity_statistic_id)
+                            live_value: float | None = None
+                            if live_state is not None:
+                                try:
+                                    live_value = float(live_state.state)
+                                except (TypeError, ValueError):
+                                    live_value = None
+                            if live_value is not None:
+                                imported_total = sum(value for _day, value in rows_to_import)
+                                sum_alignment_offset = live_value - imported_total
+                                sum_aligned_to_existing = True
 
+                # The written "state" must represent the reconstructed cumulative
+                # meter reading (matching how the live entity's real hourly
+                # statistics are stored), not the raw daily consumption delta.
+                # Writing the delta as "state" creates a visible drop/spike
+                # against the surrounding real hourly readings.
                 statistics_rows = []
                 for day, value in rows_to_import:
                     running_sum = sum_alignment_offset + imported_cumulative_by_day[day]
@@ -1156,7 +1201,7 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
                     statistics_rows.append(
                         StatisticData(
                             start=start_at,
-                            state=value,
+                            state=running_sum,
                             sum=running_sum,
                         )
                     )
@@ -1173,6 +1218,7 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
                             "fallback_statistic_id": fallback_statistic_id,
                             "skipped_partial_days": skipped_partial_days,
                             "skipped_hourly_days": skipped_hourly_days,
+                            "skipped_zero_days": skipped_zero_days,
                             "sum_aligned_to_existing": sum_aligned_to_existing,
                             "sum_alignment_offset": round(sum_alignment_offset, 6),
                         }
@@ -1206,6 +1252,7 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
                         "fallback_statistic_id": fallback_statistic_id,
                         "skipped_partial_days": skipped_partial_days,
                         "skipped_hourly_days": skipped_hourly_days,
+                        "skipped_zero_days": skipped_zero_days,
                         "sum_aligned_to_existing": sum_aligned_to_existing,
                         "sum_alignment_offset": round(sum_alignment_offset, 6),
                     }
@@ -1253,6 +1300,7 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
                     "gateway": gateway,
                     "months_back": months_back,
                     "overwrite": overwrite,
+                    "allow_external_fallback": allow_external_fallback,
                     "query_delay_ms": query_delay_ms,
                     "imported": imported,
                     "errors": errors,

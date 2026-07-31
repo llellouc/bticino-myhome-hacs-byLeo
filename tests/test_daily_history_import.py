@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from functools import partial
 import json
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -73,6 +73,7 @@ async def test_import_persists_scaled_daily_statistics(
         {
             "gateway": GATEWAY_MAC,
             "sensor_key": "test_sensor",
+            "allow_external_fallback": True,
             "months_back": 24,
             "query_delay_ms": 0,
         }
@@ -101,7 +102,10 @@ async def test_import_persists_scaled_daily_statistics(
     )
 
     rows = persisted[statistic_id]
-    assert [row["state"] for row in rows] == expected_values
+    assert [row["state"] for row in rows] == [
+        expected_values[0],
+        expected_values[0] + expected_values[1],
+    ]
     assert [row["sum"] for row in rows] == [
         expected_values[0],
         expected_values[0] + expected_values[1],
@@ -158,7 +162,7 @@ async def test_power_energy_import_targets_existing_energy_entity(
         datetime.combine(history_rows[0]["date"], datetime.min.time(), timezone.utc),
         datetime.combine(history_rows[-1]["date"], datetime.max.time(), timezone.utc),
     )
-    assert [row["state"] for row in persisted[entity_id]] == [1500.0, 2500.0]
+    assert [row["state"] for row in persisted[entity_id]] == [1500.0, 4000.0]
 
 
 async def test_import_reports_gateway_failure_without_writing_statistics(
@@ -181,6 +185,79 @@ async def test_import_reports_gateway_failure_without_writing_statistics(
     assert body["ok"] is False
     assert body["imported"] == []
     assert body["errors"] == ["51: failed to fetch gateway history (ConnectionError: F454 unavailable)"]
+
+
+async def test_import_reports_missing_entity_id_when_fallback_disabled(
+    async_setup_recorder_instance,
+    hass,
+    configured_import_view,
+):
+    """Import fails explicitly when no matching entity statistic id is found."""
+    await async_setup_recorder_instance(hass)
+    view, _gateway_handler, config = configured_import_view
+    config["sensor"]["test_sensor"]["class"] = "power_energy"
+
+    request = import_request({"gateway": GATEWAY_MAC, "sensor_key": "test_sensor"})
+    request.app["hass"] = hass
+
+    response = await view.post(request)
+    body = json.loads(response.text)
+
+    assert response.status == 500
+    assert body["ok"] is False
+    assert len(body["errors"]) == 1
+    assert "entity statistic id not found" in body["errors"][0]
+    assert body["imported"][0]["rows"] == 0
+    assert body["imported"][0]["statistic_id"] is None
+
+
+async def test_import_skips_zero_daily_values(
+    async_setup_recorder_instance,
+    hass,
+    configured_import_view,
+    history_rows,
+):
+    """Import ignores zero-value days to keep graphs readable."""
+    from pytest_homeassistant_custom_component.components.recorder.common import (
+        async_recorder_block_till_done,
+    )
+
+    await async_setup_recorder_instance(hass)
+    view, gateway_handler, config = configured_import_view
+    config["sensor"]["test_sensor"]["class"] = "energy"
+    gateway_handler.fetch_daily_history.return_value = [
+        history_rows[0],
+        {"date": history_rows[1]["date"] + timedelta(days=1), "value": 0.0},
+        history_rows[1],
+    ]
+
+    request = import_request(
+        {
+            "gateway": GATEWAY_MAC,
+            "sensor_key": "test_sensor",
+            "allow_external_fallback": True,
+        }
+    )
+    request.app["hass"] = hass
+
+    response = await view.post(request)
+    body = json.loads(response.text)
+
+    assert response.status == 200, body
+    assert body["ok"] is True
+    assert body["errors"] == []
+    assert body["imported"][0]["rows"] == 2
+    assert body["imported"][0]["skipped_zero_days"] == 1
+
+    await async_recorder_block_till_done(hass)
+    statistic_id = f"{DOMAIN}:{sanitize_key(f'daily_{GATEWAY_MAC}_energy_51')}"
+    persisted = await _statistics_rows(
+        hass,
+        statistic_id,
+        datetime.combine(history_rows[0]["date"], datetime.min.time(), timezone.utc),
+        datetime.combine(history_rows[1]["date"] + timedelta(days=1), datetime.max.time(), timezone.utc),
+    )
+    assert [row["state"] for row in persisted[statistic_id]] == [1500.0, 4000.0]
 
 
 def test_recorder_payload_rejects_invalid_external_statistic_source():
@@ -250,4 +327,4 @@ async def test_power_energy_import_legacy_entity_naming_fallback(
         datetime.combine(history_rows[0]["date"], datetime.min.time(), timezone.utc),
         datetime.combine(history_rows[-1]["date"], datetime.max.time(), timezone.utc),
     )
-    assert [row["state"] for row in persisted[entity_id]] == [1500.0, 2500.0]
+    assert [row["state"] for row in persisted[entity_id]] == [1500.0, 4000.0]
