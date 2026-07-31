@@ -22,8 +22,13 @@ GATEWAY_MAC = "aa:bb:cc:dd:ee:ff"
 class HistoryGateway:
     """In-memory F454 history source used by import tests."""
 
-    def __init__(self, rows: list[dict[str, object]]) -> None:
+    def __init__(
+        self,
+        rows: list[dict[str, object]],
+        hourly_rows: list[dict[str, object]] | None = None,
+    ) -> None:
         self.fetch_daily_history = AsyncMock(return_value=rows)
+        self.fetch_hourly_history = AsyncMock(return_value=hourly_rows or [])
         self.log_id = "test-gateway"
 
 

@@ -532,3 +532,183 @@ async def test_power_energy_import_legacy_entity_naming_fallback(
         _import_point_start(hass, history_rows[-1]["date"]) + timedelta(hours=1),
     )
     assert [row["state"] for row in persisted[entity_id]] == [1500.0, 4000.0]
+
+
+def _hourly_point_start(hass, day: date, hour: int) -> datetime:
+    """Compute the expected write timestamp for one imported hourly point."""
+    tz = MyHOMEImportDailyEnergyHistoryView._local_tzinfo(hass)
+    return MyHOMEImportDailyEnergyHistoryView._local_hour_utc(day, hour, tz)
+
+
+def _hourly_rows_for(day: date, values: list[float]) -> list[dict[str, object]]:
+    """Build gateway hourly rows (one per hour) for a single local day."""
+    return [
+        {"date": day, "hour": hour, "value": value}
+        for hour, value in enumerate(values)
+    ]
+
+
+async def test_import_uses_hourly_detail_when_available(
+    async_setup_recorder_instance,
+    hass,
+    configured_import_view,
+    history_rows,
+):
+    """Hourly detail produces one point per hour, aligned on HA hour buckets.
+
+    The gateway reports both a per-day total (dimensions 513/514) and, for
+    roughly the last year, the 24 hourly values of a day (dimension 511).
+    Hourly points land on exactly the same buckets Home Assistant uses for
+    real statistics, so they must be preferred when available.
+    """
+    from pytest_homeassistant_custom_component.components.recorder.common import (
+        async_recorder_block_till_done,
+    )
+
+    await async_setup_recorder_instance(hass)
+    view, gateway_handler, _config = configured_import_view
+
+    first_day = history_rows[0]["date"]
+    # 24 hourly values summing exactly to that day's daily total (1500),
+    # mirroring what a real F454 returns.
+    hourly_values = [100.0, 200.0, 300.0, 400.0, 500.0] + [0.0] * 19
+    gateway_handler.fetch_hourly_history.return_value = _hourly_rows_for(
+        first_day, hourly_values
+    )
+
+    request = import_request(
+        {
+            "gateway": GATEWAY_MAC,
+            "sensor_key": "test_sensor",
+            "allow_external_fallback": True,
+            "months_back": 24,
+            "query_delay_ms": 0,
+        }
+    )
+    request.app["hass"] = hass
+
+    response = await view.post(request)
+    body = json.loads(response.text)
+
+    assert response.status == 200, body
+    assert body["errors"] == []
+    assert body["imported"][0]["hourly_detail_days"] == 1
+    # 24 hourly points for the first day + 1 daily point for the second.
+    assert body["imported"][0]["rows"] == 25
+
+    await async_recorder_block_till_done(hass)
+
+    statistic_id = f"{DOMAIN}:{sanitize_key(f'daily_{GATEWAY_MAC}_energy_51')}"
+    persisted = await _statistics_rows(
+        hass,
+        statistic_id,
+        _hourly_point_start(hass, first_day, 0) - timedelta(hours=1),
+        _import_point_start(hass, history_rows[-1]["date"]) + timedelta(hours=1),
+    )
+    rows = persisted[statistic_id]
+
+    assert len(rows) == 25
+    # Each hourly point must sit on its own local hour bucket.
+    assert rows[0]["start"] == _hourly_point_start(hass, first_day, 0).timestamp()
+    assert rows[1]["start"] == _hourly_point_start(hass, first_day, 1).timestamp()
+    # The running sum accumulates hour by hour, then adds the next day's total.
+    assert [row["sum"] for row in rows[:5]] == [100.0, 300.0, 600.0, 1000.0, 1500.0]
+    assert rows[-1]["sum"] == 1500.0 + 2500.0
+
+
+async def test_import_skips_only_colliding_hours(
+    async_setup_recorder_instance,
+    hass,
+    configured_import_view,
+    history_rows,
+):
+    """With hourly detail, only the exact colliding hour is skipped.
+
+    The daily import used to skip a whole day as soon as any real hourly
+    statistic existed for it. With hour-level points the guard becomes
+    precise: a real row only blocks the single hour bucket it occupies.
+    """
+    from homeassistant.components.recorder.models import (
+        StatisticData,
+        StatisticMeanType,
+        StatisticMetaData,
+    )
+    from homeassistant.components.recorder.statistics import (
+        async_add_external_statistics,
+    )
+    from pytest_homeassistant_custom_component.components.recorder.common import (
+        async_recorder_block_till_done,
+        async_wait_recording_done,
+    )
+
+    await async_setup_recorder_instance(hass)
+    view, gateway_handler, _config = configured_import_view
+
+    first_day = history_rows[0]["date"]
+    hourly_values = [100.0, 200.0, 300.0, 400.0, 500.0] + [0.0] * 19
+    gateway_handler.fetch_hourly_history.return_value = _hourly_rows_for(
+        first_day, hourly_values
+    )
+
+    statistic_id = f"{DOMAIN}:{sanitize_key(f'daily_{GATEWAY_MAC}_energy_51')}"
+    collision_start = _hourly_point_start(hass, first_day, 2)
+    real_existing_state = 999999.0
+
+    async_add_external_statistics(
+        hass,
+        StatisticMetaData(
+            mean_type=StatisticMeanType.NONE,
+            has_mean=False,
+            has_sum=True,
+            name="Test counter daily import",
+            source=DOMAIN,
+            statistic_id=statistic_id,
+            unit_class="energy",
+            unit_of_measurement="Wh",
+        ),
+        [
+            StatisticData(
+                start=collision_start,
+                state=real_existing_state,
+                sum=real_existing_state,
+            )
+        ],
+    )
+    await async_wait_recording_done(hass)
+
+    request = import_request(
+        {
+            "gateway": GATEWAY_MAC,
+            "sensor_key": "test_sensor",
+            "allow_external_fallback": True,
+            "months_back": 24,
+            "query_delay_ms": 0,
+        }
+    )
+    request.app["hass"] = hass
+
+    response = await view.post(request)
+    body = json.loads(response.text)
+
+    assert response.status == 200, body
+    assert body["errors"] == []
+    # 25 candidate points minus the single colliding hour.
+    assert body["imported"][0]["rows"] == 24
+    assert body["imported"][0]["skipped_hourly_days"] == 1
+
+    await async_recorder_block_till_done(hass)
+
+    persisted = await _statistics_rows(
+        hass,
+        statistic_id,
+        _hourly_point_start(hass, first_day, 0) - timedelta(hours=1),
+        _import_point_start(hass, history_rows[-1]["date"]) + timedelta(hours=1),
+    )
+    rows = persisted[statistic_id]
+    by_start = {row["start"]: row for row in rows}
+
+    # The real value must survive untouched...
+    assert by_start[collision_start.timestamp()]["sum"] == real_existing_state
+    # ...while the surrounding hours are still imported normally.
+    assert by_start[_hourly_point_start(hass, first_day, 1).timestamp()]["sum"] == 300.0
+    assert by_start[_hourly_point_start(hass, first_day, 3).timestamp()]["sum"] == 1000.0

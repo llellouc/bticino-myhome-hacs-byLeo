@@ -224,6 +224,7 @@ export async function runImportForModal(panel) {
       gateway: panel._state.gateway,
       sensor_key: panel._importModal.key,
       dont_override_hourly: !!panel._importModal.dontOverrideHourly,
+      use_hourly_detail: !!panel._importModal.useHourlyDetail,
       allow_external_fallback: false,
       months_back: panel._importModal.monthsBack,
       query_delay_ms: 200,

@@ -2,7 +2,7 @@
 import asyncio
 import logging
 import re
-from datetime import date
+from datetime import date, timedelta
 from typing import Any, Callable, Dict, List
 
 from homeassistant.const import (
@@ -330,6 +330,7 @@ class MyHOMEGatewayHandler:
         max_timeout: float = 8.0,
         retries: int = 2,
         retry_delay: float = 0.8,
+        expected_items: int | None = None,
     ) -> list[OWNEnergyEvent]:
         for attempt in range(retries + 1):
             queue: asyncio.Queue = asyncio.Queue()
@@ -351,10 +352,20 @@ class MyHOMEGatewayHandler:
                         continue
                     return results
 
+                # When the exact number of expected replies is known (e.g. the
+                # 24 hourly values of a single day), returning as soon as they
+                # have all arrived avoids waiting out the idle timeout on every
+                # single query - which matters a lot for hourly imports, where
+                # one query is issued per day.
+                if expected_items is not None and len(results) >= expected_items:
+                    return results
+
                 while (loop.time() - start) < max_timeout:
                     try:
                         item = await asyncio.wait_for(queue.get(), timeout=idle_timeout)
                         results.append(item)
+                        if expected_items is not None and len(results) >= expected_items:
+                            break
                     except asyncio.TimeoutError:
                         break
 
@@ -415,6 +426,72 @@ class MyHOMEGatewayHandler:
             await asyncio.sleep(max(0.0, query_delay))
 
         all_rows.sort(key=lambda item: item["date"])
+        return all_rows
+
+    async def fetch_hourly_history(
+        self,
+        where: str,
+        days_back: int = 365,
+        query_delay: float = 0.05,
+    ) -> list[dict[str, Any]]:
+        """Fetch per-hour consumption history from gateway for one energy endpoint.
+
+        OWN dimension 511 returns, for a single day, the 24 hourly consumption
+        values plus a whole-day total (value index 25, surfaced by the parser
+        as a daily_consumption message and therefore ignored here). Its frames
+        carry only month and day - never a year - so the gateway can only
+        serve roughly the last 12 months this way, which is why daily history
+        (dimensions 513/514) remains the source for older periods.
+
+        Hourly points are worth the extra queries because they land exactly on
+        Home Assistant's own hourly statistics buckets, instead of a single
+        reconstructed point per day that cannot align with real hourly data.
+        """
+        where = str(where)
+        all_rows: list[dict[str, Any]] = []
+        today = date.today()
+
+        for offset in range(max(1, days_back), 0, -1):
+            day = today - timedelta(days=offset)
+            command = OWNEnergyCommand.get_hourly_consumption(where, day)
+            if command is None:
+                # Older than the ~1 year the gateway keeps at hourly detail.
+                continue
+
+            def _matcher(msg: OWNEnergyEvent, expected_where: str = where, expected_day: date = day):
+                return (
+                    msg.message_type == "hourly_consumption"
+                    and self._extract_energy_where(msg) == expected_where
+                    and bool(msg.hourly_consumption)
+                    and msg.hourly_consumption.get("date") == expected_day
+                    and "hour" in msg.hourly_consumption
+                    and "value" in msg.hourly_consumption
+                )
+
+            day_rows = await self._collect_energy_events(
+                command=command,
+                matcher=_matcher,
+                expected_items=24,
+            )
+
+            seen_hours: set[int] = set()
+            for row in day_rows:
+                hour = int(row.hourly_consumption["hour"])
+                if hour in seen_hours:
+                    continue
+                seen_hours.add(hour)
+                all_rows.append(
+                    {
+                        "date": day,
+                        "hour": hour,
+                        "value": int(row.hourly_consumption["value"]),
+                    }
+                )
+
+            # Avoid saturating gateway command queue during bulk imports.
+            await asyncio.sleep(max(0.0, query_delay))
+
+        all_rows.sort(key=lambda item: (item["date"], item["hour"]))
         return all_rows
 
     @staticmethod

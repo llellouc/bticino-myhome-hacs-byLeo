@@ -21,6 +21,10 @@ export function renderImportModal(panel) {
               <input id="modal_dont_override_hourly" type="checkbox" ${m.dontOverrideHourly ? "checked" : ""} ${dis}/>
               Ne pas importer un jour si des donn&eacute;es horaires existent d&eacute;j&agrave;
             </label>
+            <label>
+              <input id="modal_use_hourly_detail" type="checkbox" ${m.useHourlyDetail ? "checked" : ""} ${dis}/>
+              D&eacute;tail horaire quand disponible (~12 derniers mois, plus pr&eacute;cis mais plus lent)
+            </label>
           </div>
           ${m.result ? `<div class="notice">${panel._esc(m.result)}</div>` : ""}
           ${m.error ? `<div class="error">${panel._esc(m.error)}</div>` : ""}

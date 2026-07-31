@@ -54,6 +54,7 @@ export function bindEvents(panel) {
         sensorClass: btn.dataset.importClass,
         unitScale: btn.dataset.importScale,
         dontOverrideHourly: true,
+        useHourlyDetail: true,
         monthsBack: 24,
         result: null,
         error: null,
@@ -85,6 +86,18 @@ export function bindEvents(panel) {
         panel._importModal = {
           ...panel._importModal,
           dontOverrideHourly: modalDontOverrideHourly.checked,
+        };
+      }
+    });
+  }
+
+  const modalUseHourlyDetail = panel.querySelector("#modal_use_hourly_detail");
+  if (modalUseHourlyDetail) {
+    modalUseHourlyDetail.addEventListener("change", () => {
+      if (panel._importModal) {
+        panel._importModal = {
+          ...panel._importModal,
+          useHourlyDetail: modalUseHourlyDetail.checked,
         };
       }
     });

@@ -665,6 +665,19 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
         return local_next_day_start.astimezone(timezone.utc)
 
     @staticmethod
+    def _local_hour_utc(day: date, hour: int, tz: Any) -> datetime:
+        """Return the UTC timestamp of a given local hour of a local day.
+
+        OWN hourly consumption (dimension 511) is reported against the
+        gateway's own local clock, while Home Assistant stores statistics in
+        UTC-aligned hour buckets. Converting here makes each imported hourly
+        point land on exactly the same bucket a real hourly statistic would
+        occupy for that hour.
+        """
+        local_start = datetime.combine(day, time.min, tzinfo=tz) + timedelta(hours=hour)
+        return local_start.astimezone(timezone.utc)
+
+    @staticmethod
     def _load_hourly_daily_totals(
         hass,
         recorder_statistics,
@@ -672,11 +685,16 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
         start_day: date,
         end_day: date,
         tz: Any,
-    ) -> dict[date, dict[str, float]]:
-        """Return per-day totals inferred from hourly sums for a statistic."""
+    ) -> tuple[dict[date, dict[str, float]], set[datetime]]:
+        """Return per-day totals and occupied slots inferred from hourly sums.
+
+        The second element is the set of exact UTC timestamps that already
+        hold a real statistic row, used to avoid overwriting genuine data
+        with reconstructed history.
+        """
         stats_during_period = getattr(recorder_statistics, "statistics_during_period", None)
         if stats_during_period is None:
-            return {}
+            return {}, set()
 
         # Query with a one-day buffer on each side: local calendar days don't
         # align with UTC day boundaries once a timezone offset is applied, so
@@ -707,16 +725,17 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
                     {"sum"},
                 )
             except Exception:  # pylint: disable=broad-except
-                return {}
+                return {}, set()
         except Exception:  # pylint: disable=broad-except
-            return {}
+            return {}, set()
 
         rows = data.get(statistic_id) if isinstance(data, dict) else None
         if not rows:
-            return {}
+            return {}, set()
 
         by_day: dict[date, list[float]] = {}
         midnight_occupied: dict[date, bool] = {}
+        occupied_starts: set[datetime] = set()
         for row in rows:
             if not isinstance(row, dict):
                 continue
@@ -727,6 +746,7 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
             try:
                 if isinstance(row_start, (int, float)):
                     row_start = datetime.fromtimestamp(float(row_start), tz=timezone.utc)
+                occupied_starts.add(row_start.astimezone(timezone.utc))
                 # Real hourly statistics must be attributed to their LOCAL
                 # calendar day (matching the gateway's own daily_consumption
                 # reporting), not the UTC date of their storage timestamp.
@@ -784,7 +804,7 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
                     "points": 0.0,
                     "midnight_occupied": 1.0,
                 }
-        return result
+        return result, occupied_starts
 
     @staticmethod
     def _is_close_daily_value(imported_value: float, hourly_value: float) -> bool:
@@ -1004,6 +1024,14 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
         # "overwrite" behavior).
         dont_override_hourly = to_bool(payload.get("dont_override_hourly"), True)
         allow_external_fallback = to_bool(payload.get("allow_external_fallback"), False)
+        # Hourly detail (OWN dimension 511) is far more accurate than the
+        # daily reconstruction because each point lands on the exact hour
+        # bucket Home Assistant uses for real statistics. The gateway only
+        # keeps ~12 months at that granularity (its frames carry no year), so
+        # older days still come from daily history.
+        use_hourly_detail = to_bool(payload.get("use_hourly_detail"), True)
+        hourly_days_back = to_int(payload.get("hourly_days_back"), 365)
+        hourly_days_back = max(0, min(365, hourly_days_back))
         query_delay_ms = to_int(payload.get("query_delay_ms"), 200)
         query_delay_ms = max(0, min(2000, query_delay_ms))
         query_delay = query_delay_ms / 1000.0
@@ -1079,6 +1107,24 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
                     )
                     continue
 
+                hourly_rows: list[dict[str, Any]] = []
+                if use_hourly_detail and hourly_days_back > 0:
+                    try:
+                        hourly_rows = await gateway_handler.fetch_hourly_history(
+                            where=where,
+                            days_back=min(hourly_days_back, months_back * 31),
+                            query_delay=min(query_delay, 0.05),
+                        )
+                    except Exception as err:  # pylint: disable=broad-except
+                        # Hourly detail is an accuracy improvement, not a
+                        # requirement: fall back to daily-only rather than
+                        # failing the whole import for this endpoint.
+                        errors.append(
+                            f"{where}: failed to fetch hourly detail, falling back to daily "
+                            f"({type(err).__name__}: {err})"
+                        )
+                        hourly_rows = []
+
                 if len(rows) == 0:
                     imported.append(
                         {
@@ -1152,15 +1198,33 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
                 source_rows = sorted(rows, key=lambda item: item["date"])
                 filtered_rows = [row for row in source_rows if row["date"] < today]
 
+                # Hourly detail, indexed by local day, takes precedence over
+                # that day's single daily value whenever it is available.
+                hourly_by_day: dict[date, dict[int, float]] = {}
+                for hourly_row in hourly_rows:
+                    hourly_day_date = hourly_row.get("date")
+                    if hourly_day_date is None or hourly_day_date >= today:
+                        continue
+                    hour = int(hourly_row.get("hour", -1))
+                    if not 0 <= hour <= 23:
+                        continue
+                    hourly_by_day.setdefault(hourly_day_date, {})[hour] = float(
+                        hourly_row.get("value", 0)
+                    )
+
                 skipped_partial_days = len(source_rows) - len(filtered_rows)
                 skipped_hourly_days = 0
                 skipped_zero_days = 0
+                hourly_detail_days = 0
 
                 if filtered_rows:
                     first_day = filtered_rows[0]["date"]
                     last_day = filtered_rows[-1]["date"]
                     try:
-                        hourly_day_totals = await recorder_instance.async_add_executor_job(
+                        (
+                            hourly_day_totals,
+                            occupied_starts,
+                        ) = await recorder_instance.async_add_executor_job(
                             self._load_hourly_daily_totals,
                             hass,
                             recorder_statistics,
@@ -1174,47 +1238,62 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
                             f"{where}: failed to read existing hourly statistics ({type(err).__name__}: {err})"
                         )
                         hourly_day_totals = {}
+                        occupied_starts = set()
                 else:
                     hourly_day_totals = {}
+                    occupied_starts = set()
 
-                rows_to_import: list[tuple[date, float]] = []
+                scale = 1000.0 if target["unit_scale"] == "kilo" else 1.0
+
+                # Every point is a consumption delta stamped with the exact UTC
+                # instant it belongs to: one point per hour when hourly detail
+                # is available, otherwise a single end-of-day point.
+                rows_to_import: list[tuple[datetime, float]] = []
                 day_values: list[tuple[date, float]] = []
+                cumulative_at_day_end: dict[date, float] = {}
+                running_imported_total = 0.0
+
                 for row in filtered_rows:
                     day = row["date"]
-                    value = float(row["value"])
-                    if target["unit_scale"] == "kilo":
-                        value = value / 1000.0
+                    value = float(row["value"]) / scale
                     if isclose(value, 0.0, rel_tol=0.0, abs_tol=1e-9):
+                        # A zero daily total means the gateway has no data for
+                        # that day rather than genuinely zero consumption.
                         skipped_zero_days += 1
                         continue
 
-                    day_values.append((day, value))
+                    day_hours = hourly_by_day.get(day)
+                    if day_hours:
+                        hourly_detail_days += 1
+                        day_points = [
+                            (
+                                self._local_hour_utc(day, hour, local_tz),
+                                day_hours[hour] / scale,
+                            )
+                            for hour in sorted(day_hours)
+                        ]
+                        # Trust the daily total as the day's reference value:
+                        # it is what the alignment tolerance check compares
+                        # against, and both sources agree on real hardware.
+                        day_values.append((day, sum(v for _start, v in day_points)))
+                    else:
+                        day_points = [(self._day_end_utc(day, local_tz), value)]
+                        day_values.append((day, value))
 
-                    hourly_day = hourly_day_totals.get(day)
-                    # Our import always writes a single point at this day's
-                    # midnight (UTC). HA's hourly statistics compiler always
-                    # aligns real hourly rows to exact hour boundaries, so a
-                    # real point already sitting at exactly that timestamp is
-                    # the only genuine collision risk - checking for it here
-                    # is exact, with no time-window tolerance needed. This
-                    # guard only applies when dont_override_hourly is active.
-                    if (
-                        dont_override_hourly
-                        and hourly_day is not None
-                        and hourly_day.get("midnight_occupied")
-                    ):
-                        skipped_hourly_days += 1
-                        continue
+                    for start_at, delta in day_points:
+                        running_imported_total += delta
+                        # Real statistics always win: HA aligns hourly rows to
+                        # exact hour boundaries, and so do our imported points,
+                        # so an exact timestamp match is a genuine collision.
+                        if dont_override_hourly and start_at in occupied_starts:
+                            skipped_hourly_days += 1
+                            continue
+                        rows_to_import.append((start_at, running_imported_total))
 
-                    rows_to_import.append((day, value))
+                    cumulative_at_day_end[day] = running_imported_total
 
                 sum_alignment_offset = 0.0
                 sum_aligned_to_existing = False
-                imported_cumulative_by_day: dict[date, float] = {}
-                running_imported_total = 0.0
-                for day, value in day_values:
-                    running_imported_total += value
-                    imported_cumulative_by_day[day] = running_imported_total
 
                 if entity_statistic_id and len(day_values) > 0:
                     offset_candidates: list[float] = []
@@ -1238,7 +1317,7 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
                         ):
                             continue
                         end_sum = hourly_day.get("end_sum")
-                        imported_cumulative = imported_cumulative_by_day.get(day)
+                        imported_cumulative = cumulative_at_day_end.get(day)
                         if end_sum is None or imported_cumulative is None:
                             continue
                         offset_candidates.append(float(end_sum) - float(imported_cumulative))
@@ -1255,7 +1334,7 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
                         sum_aligned_to_existing = True
                     elif len(rows_to_import) > 0:
                         # Fallback when no reliable overlap anchor exists.
-                        first_import_start = self._day_end_utc(rows_to_import[0][0], local_tz)
+                        first_import_start = rows_to_import[0][0]
                         try:
                             first_existing_sum = await recorder_instance.async_add_executor_job(
                                 self._find_first_existing_sum_from,
@@ -1273,9 +1352,9 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
                         if first_existing_sum is not None:
                             first_existing_start = first_existing_sum["start"]
                             first_existing_value = float(first_existing_sum["sum"])
-                            last_import_start = self._day_end_utc(rows_to_import[-1][0], local_tz)
+                            last_import_start = rows_to_import[-1][0]
                             if first_existing_start > last_import_start:
-                                imported_total = sum(value for _day, value in rows_to_import)
+                                imported_total = running_imported_total
                                 sum_alignment_offset = first_existing_value - imported_total
                                 sum_aligned_to_existing = True
                         else:
@@ -1292,20 +1371,17 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
                                 except (TypeError, ValueError):
                                     live_value = None
                             if live_value is not None:
-                                imported_total = sum(value for _day, value in rows_to_import)
-                                sum_alignment_offset = live_value - imported_total
+                                sum_alignment_offset = live_value - running_imported_total
                                 sum_aligned_to_existing = True
 
                 # The written "state" must represent the reconstructed cumulative
                 # meter reading (matching how the live entity's real hourly
-                # statistics are stored), not the raw daily consumption delta.
-                # Writing the delta as "state" creates a visible drop/spike
-                # against the surrounding real hourly readings.
+                # statistics are stored), not the raw consumption delta. Writing
+                # the delta as "state" creates a visible drop/spike against the
+                # surrounding real hourly readings.
                 statistics_rows = []
-                for day, value in rows_to_import:
-                    running_sum = sum_alignment_offset + imported_cumulative_by_day[day]
-
-                    start_at = self._day_end_utc(day, local_tz)
+                for start_at, cumulative in rows_to_import:
+                    running_sum = sum_alignment_offset + cumulative
                     statistics_rows.append(
                         StatisticData(
                             start=start_at,
@@ -1327,6 +1403,7 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
                             "skipped_partial_days": skipped_partial_days,
                             "skipped_hourly_days": skipped_hourly_days,
                             "skipped_zero_days": skipped_zero_days,
+                            "hourly_detail_days": hourly_detail_days,
                             "sum_aligned_to_existing": sum_aligned_to_existing,
                             "sum_alignment_offset": round(sum_alignment_offset, 6),
                         }
@@ -1361,6 +1438,7 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
                         "skipped_partial_days": skipped_partial_days,
                         "skipped_hourly_days": skipped_hourly_days,
                         "skipped_zero_days": skipped_zero_days,
+                        "hourly_detail_days": hourly_detail_days,
                         "sum_aligned_to_existing": sum_aligned_to_existing,
                         "sum_alignment_offset": round(sum_alignment_offset, 6),
                     }
