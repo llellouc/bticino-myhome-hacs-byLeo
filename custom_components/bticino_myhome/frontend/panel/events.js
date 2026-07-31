@@ -53,7 +53,7 @@ export function bindEvents(panel) {
         where: btn.dataset.importWhere,
         sensorClass: btn.dataset.importClass,
         unitScale: btn.dataset.importScale,
-        overwrite: false,
+        dontOverrideHourly: true,
         monthsBack: 24,
         result: null,
         error: null,
@@ -78,11 +78,14 @@ export function bindEvents(panel) {
     });
   }
 
-  const modalOverwrite = panel.querySelector("#modal_overwrite");
-  if (modalOverwrite) {
-    modalOverwrite.addEventListener("change", () => {
+  const modalDontOverrideHourly = panel.querySelector("#modal_dont_override_hourly");
+  if (modalDontOverrideHourly) {
+    modalDontOverrideHourly.addEventListener("change", () => {
       if (panel._importModal) {
-        panel._importModal = { ...panel._importModal, overwrite: modalOverwrite.checked };
+        panel._importModal = {
+          ...panel._importModal,
+          dontOverrideHourly: modalDontOverrideHourly.checked,
+        };
       }
     });
   }

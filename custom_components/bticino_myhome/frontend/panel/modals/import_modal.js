@@ -18,8 +18,8 @@ export function renderImportModal(panel) {
           </div>
           <div class="checks" style="margin-bottom:14px">
             <label>
-              <input id="modal_overwrite" type="checkbox" ${m.overwrite ? "checked" : ""} ${dis}/>
-              Remplacer les jours d&eacute;j&agrave; import&eacute;s (upsert)
+              <input id="modal_dont_override_hourly" type="checkbox" ${m.dontOverrideHourly ? "checked" : ""} ${dis}/>
+              Ne pas importer un jour si des donn&eacute;es horaires existent d&eacute;j&agrave;
             </label>
           </div>
           ${m.result ? `<div class="notice">${panel._esc(m.result)}</div>` : ""}

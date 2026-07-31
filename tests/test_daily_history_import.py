@@ -114,6 +114,195 @@ async def test_import_persists_scaled_daily_statistics(
     assert metadata[statistic_id][1]["unit_of_measurement"] == expected_unit
 
 
+async def test_import_never_overwrites_day_with_partial_existing_hourly_data(
+    async_setup_recorder_instance,
+    hass,
+    configured_import_view,
+    history_rows,
+):
+    """A day with even a single pre-existing real hourly point must be skipped.
+
+    Regression test: previously, days with fewer than 3 existing hourly
+    statistics points were treated as if they had no real data at all,
+    so the daily import would still write its own reconstructed point for
+    that day. When that point's timestamp coincided with an already
+    existing real hourly statistic (e.g. a boundary day where live
+    collection had only just started), the upsert silently replaced the
+    real value with our reconstruction, producing a visible spike/drop
+    in the entity's history graph.
+    """
+    from homeassistant.components.recorder.models import (
+        StatisticData,
+        StatisticMeanType,
+        StatisticMetaData,
+    )
+    from homeassistant.components.recorder.statistics import (
+        async_add_external_statistics,
+    )
+    from pytest_homeassistant_custom_component.components.recorder.common import (
+        async_recorder_block_till_done,
+        async_wait_recording_done,
+    )
+
+    await async_setup_recorder_instance(hass)
+    view, _gateway_handler, config = configured_import_view
+    config["sensor"]["test_sensor"]["class"] = "energy"
+
+    statistic_id = f"{DOMAIN}:{sanitize_key(f'daily_{GATEWAY_MAC}_energy_51')}"
+    first_day = history_rows[0]["date"]
+    existing_start = datetime.combine(first_day, datetime.min.time(), timezone.utc)
+    real_existing_state = 999999.0
+
+    async_add_external_statistics(
+        hass,
+        StatisticMetaData(
+            mean_type=StatisticMeanType.NONE,
+            has_mean=False,
+            has_sum=True,
+            name="Test counter daily import",
+            source=DOMAIN,
+            statistic_id=statistic_id,
+            unit_class="energy",
+            unit_of_measurement="Wh",
+        ),
+        [
+            StatisticData(
+                start=existing_start,
+                state=real_existing_state,
+                sum=real_existing_state,
+            )
+        ],
+    )
+    await async_wait_recording_done(hass)
+
+    request = import_request(
+        {
+            "gateway": GATEWAY_MAC,
+            "sensor_key": "test_sensor",
+            "allow_external_fallback": True,
+        }
+    )
+    request.app["hass"] = hass
+
+    response = await view.post(request)
+    body = json.loads(response.text)
+
+    assert response.status == 200, body
+    assert body["errors"] == []
+    # Only the second day should have been imported; the first day already
+    # has (partial) real hourly data and must be preserved untouched.
+    assert body["imported"][0]["rows"] == 1
+    assert body["imported"][0]["skipped_hourly_days"] == 1
+
+    await async_recorder_block_till_done(hass)
+    persisted = await _statistics_rows(
+        hass,
+        statistic_id,
+        existing_start,
+        datetime.combine(history_rows[-1]["date"], datetime.max.time(), timezone.utc),
+    )
+    rows = persisted[statistic_id]
+
+    # Only two hourly rows should exist in this window: the untouched
+    # pre-existing real point (first) and our reconstructed import for the
+    # second day. The real point's state must be preserved unchanged.
+    assert len(rows) == 2
+    assert rows[0]["state"] == real_existing_state
+    assert rows[0]["sum"] == real_existing_state
+
+
+async def test_import_can_force_override_hourly_data_when_flag_disabled(
+    async_setup_recorder_instance,
+    hass,
+    configured_import_view,
+    history_rows,
+):
+    """Unchecking "dont_override_hourly" bypasses the hourly-collision guard.
+
+    Same setup as test_import_never_overwrites_day_with_partial_existing_hourly_data,
+    but with dont_override_hourly=False: the import must now write over the
+    existing real hourly point instead of skipping that day.
+    """
+    from homeassistant.components.recorder.models import (
+        StatisticData,
+        StatisticMeanType,
+        StatisticMetaData,
+    )
+    from homeassistant.components.recorder.statistics import (
+        async_add_external_statistics,
+    )
+    from pytest_homeassistant_custom_component.components.recorder.common import (
+        async_recorder_block_till_done,
+        async_wait_recording_done,
+    )
+
+    await async_setup_recorder_instance(hass)
+    view, _gateway_handler, config = configured_import_view
+    config["sensor"]["test_sensor"]["class"] = "energy"
+
+    statistic_id = f"{DOMAIN}:{sanitize_key(f'daily_{GATEWAY_MAC}_energy_51')}"
+    first_day = history_rows[0]["date"]
+    existing_start = datetime.combine(first_day, datetime.min.time(), timezone.utc)
+    real_existing_state = 999999.0
+
+    async_add_external_statistics(
+        hass,
+        StatisticMetaData(
+            mean_type=StatisticMeanType.NONE,
+            has_mean=False,
+            has_sum=True,
+            name="Test counter daily import",
+            source=DOMAIN,
+            statistic_id=statistic_id,
+            unit_class="energy",
+            unit_of_measurement="Wh",
+        ),
+        [
+            StatisticData(
+                start=existing_start,
+                state=real_existing_state,
+                sum=real_existing_state,
+            )
+        ],
+    )
+    await async_wait_recording_done(hass)
+
+    request = import_request(
+        {
+            "gateway": GATEWAY_MAC,
+            "sensor_key": "test_sensor",
+            "allow_external_fallback": True,
+            "dont_override_hourly": False,
+        }
+    )
+    request.app["hass"] = hass
+
+    response = await view.post(request)
+    body = json.loads(response.text)
+
+    assert response.status == 200, body
+    assert body["errors"] == []
+    # Both days should be imported now: the guard is bypassed when the flag
+    # is disabled, so the first day's pre-existing point gets overwritten.
+    assert body["imported"][0]["rows"] == 2
+    assert body["imported"][0]["skipped_hourly_days"] == 0
+    assert body["dont_override_hourly"] is False
+
+    await async_recorder_block_till_done(hass)
+    persisted = await _statistics_rows(
+        hass,
+        statistic_id,
+        existing_start,
+        datetime.combine(history_rows[-1]["date"], datetime.max.time(), timezone.utc),
+    )
+    rows = persisted[statistic_id]
+
+    assert len(rows) == 2
+    # The first day's real point must now be overwritten by our reconstruction.
+    assert rows[0]["state"] != real_existing_state
+    assert rows[0]["sum"] != real_existing_state
+
+
 async def test_power_energy_import_targets_existing_energy_entity(
     async_setup_recorder_instance,
     hass,

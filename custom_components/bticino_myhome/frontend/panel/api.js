@@ -223,7 +223,7 @@ export async function runImportForModal(panel) {
     const response = await panel._hass.callApi("POST", "bticino_myhome/energy/import_daily", {
       gateway: panel._state.gateway,
       sensor_key: panel._importModal.key,
-      overwrite: !!panel._importModal.overwrite,
+      dont_override_hourly: !!panel._importModal.dontOverrideHourly,
       allow_external_fallback: false,
       months_back: panel._importModal.monthsBack,
       query_delay_ms: 200,

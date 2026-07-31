@@ -647,6 +647,7 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
                 end_time=end_dt,
                 statistic_ids=[statistic_id],
                 period="hour",
+                units=None,
                 types={"sum"},
             )
         except TypeError:
@@ -659,7 +660,6 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
                     "hour",
                     None,
                     {"sum"},
-                    False,
                 )
             except Exception:  # pylint: disable=broad-except
                 return {}
@@ -671,6 +671,7 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
             return {}
 
         by_day: dict[date, list[float]] = {}
+        midnight_occupied: dict[date, bool] = {}
         for row in rows:
             if not isinstance(row, dict):
                 continue
@@ -683,14 +684,24 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
                     row_start = datetime.fromtimestamp(float(row_start), tz=timezone.utc)
                 day = row_start.date()
                 by_day.setdefault(day, []).append(float(row_sum))
+                if row_start == datetime.combine(day, time.min, tzinfo=timezone.utc):
+                    midnight_occupied[day] = True
             except Exception:  # pylint: disable=broad-except
                 continue
 
         result: dict[date, dict[str, float]] = {}
         for day, sums in by_day.items():
-            if len(sums) < 3:
-                # Too few points to reliably represent a detailed hourly day.
-                continue
+            # A day is included here whenever it has at least one existing
+            # hourly point, purely to feed the cumulative-offset alignment
+            # estimate below (subject to _is_close_daily_value's tolerance
+            # check, which naturally rejects unrepresentative single-hour
+            # totals). Whether a day is safe to *import into* is a separate
+            # question decided by "midnight_occupied" below: our own import
+            # always writes a single point at the day's midnight (UTC), and
+            # HA's hourly statistics compiler always aligns real hourly rows
+            # to exact hour boundaries, so checking for an existing row at
+            # exactly that timestamp reliably detects a real collision
+            # without needing any time-window tolerance.
             min_sum = min(sums)
             max_sum = max(sums)
             if max_sum < min_sum:
@@ -699,6 +710,7 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
                 "value": max_sum - min_sum,
                 "end_sum": max_sum,
                 "points": float(len(sums)),
+                "midnight_occupied": 1.0 if midnight_occupied.get(day) else 0.0,
             }
         return result
 
@@ -757,6 +769,7 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
                 end_time=None,
                 statistic_ids=[statistic_id],
                 period="hour",
+                units=None,
                 types={"sum"},
             )
         except TypeError:
@@ -769,7 +782,6 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
                     "hour",
                     None,
                     {"sum"},
-                    False,
                 )
             except Exception:  # pylint: disable=broad-except
                 return None
@@ -825,6 +837,7 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
                 end_time=end_at,
                 statistic_ids=[statistic_id],
                 period="hour",
+                units=None,
                 types={"state"},
             )
         except TypeError:
@@ -912,7 +925,12 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
 
         months_back = to_int(payload.get("months_back"), 24)
         months_back = max(1, min(24, months_back))
-        overwrite = to_bool(payload.get("overwrite"), False)
+        # Pre-checked by default: protects existing real hourly statistics
+        # from being collided with/overwritten by the coarse daily
+        # reconstruction. Unchecking it forces the import to write every
+        # requested day regardless of existing hourly data (previous
+        # "overwrite" behavior).
+        dont_override_hourly = to_bool(payload.get("dont_override_hourly"), True)
         allow_external_fallback = to_bool(payload.get("allow_external_fallback"), False)
         query_delay_ms = to_int(payload.get("query_delay_ms"), 200)
         query_delay_ms = max(0, min(2000, query_delay_ms))
@@ -1033,9 +1051,10 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
 
                 # Non-destructive strategy: we upsert rows for imported days only.
                 # This preserves any older rows outside the imported window.
-                if overwrite:
+                if not dont_override_hourly:
                     LOGGER.debug(
-                        "%s Overwrite requested for %s: applying window upsert without global delete.",
+                        "%s dont_override_hourly disabled for %s: hourly-collision "
+                        "guards are skipped and every requested day is imported.",
                         gateway_handler.log_id,
                         statistic_id,
                     )
@@ -1093,9 +1112,17 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
                     day_values.append((day, value))
 
                     hourly_day = hourly_day_totals.get(day)
-                    if hourly_day is not None and self._is_close_daily_value(
-                        imported_value=value,
-                        hourly_value=float(hourly_day["value"]),
+                    # Our import always writes a single point at this day's
+                    # midnight (UTC). HA's hourly statistics compiler always
+                    # aligns real hourly rows to exact hour boundaries, so a
+                    # real point already sitting at exactly that timestamp is
+                    # the only genuine collision risk - checking for it here
+                    # is exact, with no time-window tolerance needed. This
+                    # guard only applies when dont_override_hourly is active.
+                    if (
+                        dont_override_hourly
+                        and hourly_day is not None
+                        and hourly_day.get("midnight_occupied")
                     ):
                         skipped_hourly_days += 1
                         continue
@@ -1116,7 +1143,17 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
                         hourly_day = hourly_day_totals.get(day)
                         if hourly_day is None:
                             continue
-                        if not self._is_close_daily_value(
+                        # A day's existing hourly total is only used as an
+                        # anchor for the cumulative-offset alignment when it
+                        # closely matches our reconstructed value (tolerance
+                        # check below). This naturally rejects unrepresentative
+                        # partial-day totals (e.g. a boundary day where live
+                        # collection just started) without any arbitrary
+                        # minimum-point-count threshold. Like the skip guard
+                        # above, this closeness filter only applies when
+                        # dont_override_hourly is active; when disabled, any
+                        # existing hourly total is trusted as-is.
+                        if dont_override_hourly and not self._is_close_daily_value(
                             imported_value=value,
                             hourly_value=float(hourly_day["value"]),
                         ):
@@ -1266,26 +1303,62 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
                     )
 
             if persistence_checks:
-                await recorder_instance.async_block_till_done()
+                # ImportStatisticsTask (queued by async_import_statistics() /
+                # async_add_external_statistics()) is wrapped by Recorder's
+                # @retryable_database_job: if the database is transiently busy
+                # it returns False and *re-queues itself* to run again later
+                # (see homeassistant/components/recorder/tasks.py). A single
+                # async_block_till_done() call inserts one WaitTask sentinel at
+                # the tail of the queue; if the import re-queues itself after
+                # that sentinel was already enqueued, block_till_done() returns
+                # before the retried import has actually run/committed,
+                # producing a false-negative "Recorder persisted 0/N" error.
+                #
+                # HA's own recorder test helpers handle this exact class of
+                # self-rescheduling task (see async_wait_purge_done) by calling
+                # async_block_till_done() multiple times in a row: each extra
+                # call's sentinel is guaranteed to run after anything the
+                # previous cycle re-queued. Do the same here instead of a
+                # blind time-based retry.
+                max_drain_cycles = 5
+                for _ in range(max_drain_cycles):
+                    await recorder_instance.async_block_till_done()
+
                 for imported_result, statistic_id, statistics_rows in persistence_checks:
-                    try:
-                        persisted_rows = await recorder_instance.async_add_executor_job(
-                            self._persisted_statistics_count,
-                            hass,
-                            recorder_statistics,
-                            statistic_id,
-                            statistics_rows,
-                        )
-                    except Exception as err:  # pylint: disable=broad-except
+                    expected_rows = len(statistics_rows)
+                    persisted_rows = 0
+                    verification_error: Exception | None = None
+                    for attempt in range(max_drain_cycles):
+                        try:
+                            persisted_rows = await recorder_instance.async_add_executor_job(
+                                self._persisted_statistics_count,
+                                hass,
+                                recorder_statistics,
+                                statistic_id,
+                                statistics_rows,
+                            )
+                            verification_error = None
+                        except Exception as err:  # pylint: disable=broad-except
+                            verification_error = err
+                            persisted_rows = 0
+
+                        if verification_error is None and persisted_rows == expected_rows:
+                            break
+                        if attempt < max_drain_cycles - 1:
+                            # Drain again: the previous check may have run
+                            # while a self-requeued import task was still
+                            # in flight.
+                            await recorder_instance.async_block_till_done()
+
+                    if verification_error is not None:
                         errors.append(
                             f"{imported_result['where']}: failed to verify persisted statistics "
-                            f"({type(err).__name__}: {err})"
+                            f"({type(verification_error).__name__}: {verification_error})"
                         )
                         imported_result["rows"] = 0
                         continue
 
                     imported_result["persisted_rows"] = persisted_rows
-                    expected_rows = len(statistics_rows)
                     if persisted_rows != expected_rows:
                         errors.append(
                             f"{imported_result['where']}: Recorder persisted "
@@ -1299,7 +1372,7 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
                     "ok": len(errors) == 0,
                     "gateway": gateway,
                     "months_back": months_back,
-                    "overwrite": overwrite,
+                    "dont_override_hourly": dont_override_hourly,
                     "allow_external_fallback": allow_external_fallback,
                     "query_delay_ms": query_delay_ms,
                     "imported": imported,
