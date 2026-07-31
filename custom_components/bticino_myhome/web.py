@@ -1216,6 +1216,7 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
                 skipped_partial_days = len(source_rows) - len(filtered_rows)
                 skipped_hourly_days = 0
                 skipped_zero_days = 0
+                skipped_partial_hourly_days = 0
                 hourly_detail_days = 0
 
                 if filtered_rows:
@@ -1264,7 +1265,7 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
                         continue
 
                     day_hours = hourly_by_day.get(day)
-                    if day_hours:
+                    if day_hours and len(day_hours) == 24:
                         hourly_detail_days += 1
                         day_points = [
                             (
@@ -1278,6 +1279,14 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
                         # against, and both sources agree on real hardware.
                         day_values.append((day, sum(v for _start, v in day_points)))
                     else:
+                        # Only complete days (all 24 hours retrieved) are
+                        # imported at hourly detail. A truncated day would both
+                        # under-count that day's energy and, on a re-import,
+                        # leave its missing hours carrying a previous run's
+                        # cumulative offset - a day-wide step in the graph.
+                        # The single end-of-day point is always consistent.
+                        if day_hours:
+                            skipped_partial_hourly_days += 1
                         day_points = [(self._day_end_utc(day, local_tz), value)]
                         day_values.append((day, value))
 
@@ -1404,6 +1413,7 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
                             "skipped_partial_days": skipped_partial_days,
                             "skipped_hourly_days": skipped_hourly_days,
                             "skipped_zero_days": skipped_zero_days,
+                            "skipped_partial_hourly_days": skipped_partial_hourly_days,
                             "hourly_detail_days": hourly_detail_days,
                             "sum_aligned_to_existing": sum_aligned_to_existing,
                             "sum_alignment_offset": round(sum_alignment_offset, 6),
@@ -1439,6 +1449,7 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
                         "skipped_partial_days": skipped_partial_days,
                         "skipped_hourly_days": skipped_hourly_days,
                         "skipped_zero_days": skipped_zero_days,
+                        "skipped_partial_hourly_days": skipped_partial_hourly_days,
                         "hourly_detail_days": hourly_detail_days,
                         "sum_aligned_to_existing": sum_aligned_to_existing,
                         "sum_alignment_offset": round(sum_alignment_offset, 6),

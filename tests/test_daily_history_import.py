@@ -712,3 +712,68 @@ async def test_import_skips_only_colliding_hours(
     # ...while the surrounding hours are still imported normally.
     assert by_start[_hourly_point_start(hass, first_day, 1).timestamp()]["sum"] == 300.0
     assert by_start[_hourly_point_start(hass, first_day, 3).timestamp()]["sum"] == 1000.0
+
+
+async def test_import_falls_back_to_daily_point_for_incomplete_hourly_day(
+    async_setup_recorder_instance,
+    hass,
+    configured_import_view,
+    history_rows,
+):
+    """A day with fewer than 24 hourly values must not be imported hourly.
+
+    The gateway can go quiet mid-reply under load and return only part of a
+    day's 24 hourly values. Importing such a truncated day both under-counts
+    its energy and, on a re-import, leaves the missing hours holding the
+    previous run's cumulative offset - which appears as a day-wide step in
+    the energy graph. The day's single, always-consistent daily total is
+    used instead.
+    """
+    from pytest_homeassistant_custom_component.components.recorder.common import (
+        async_recorder_block_till_done,
+    )
+
+    await async_setup_recorder_instance(hass)
+    view, gateway_handler, _config = configured_import_view
+
+    first_day = history_rows[0]["date"]
+    # Only 5 of the 24 hourly values came back, as during a flaky bulk fetch.
+    gateway_handler.fetch_hourly_history.return_value = _hourly_rows_for(
+        first_day, [100.0, 200.0, 300.0, 400.0, 500.0]
+    )
+
+    request = import_request(
+        {
+            "gateway": GATEWAY_MAC,
+            "sensor_key": "test_sensor",
+            "allow_external_fallback": True,
+            "months_back": 24,
+            "query_delay_ms": 0,
+        }
+    )
+    request.app["hass"] = hass
+
+    response = await view.post(request)
+    body = json.loads(response.text)
+
+    assert response.status == 200, body
+    assert body["errors"] == []
+    # The truncated day is reported, not silently accepted.
+    assert body["imported"][0]["hourly_detail_days"] == 0
+    assert body["imported"][0]["skipped_partial_hourly_days"] == 1
+    # One end-of-day point per day instead of 24 hourly points + 1.
+    assert body["imported"][0]["rows"] == 2
+
+    await async_recorder_block_till_done(hass)
+
+    statistic_id = f"{DOMAIN}:{sanitize_key(f'daily_{GATEWAY_MAC}_energy_51')}"
+    persisted = await _statistics_rows(
+        hass,
+        statistic_id,
+        _import_point_start(hass, first_day) - timedelta(hours=1),
+        _import_point_start(hass, history_rows[-1]["date"]) + timedelta(hours=1),
+    )
+    rows = persisted[statistic_id]
+
+    # The full daily total is used, not the 1500 partial sum of the 5 hours.
+    assert [row["sum"] for row in rows] == [1500.0, 1500.0 + 2500.0]

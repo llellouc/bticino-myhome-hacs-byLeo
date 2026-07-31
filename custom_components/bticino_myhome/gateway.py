@@ -341,6 +341,10 @@ class MyHOMEGatewayHandler:
         retry_delay: float = 0.8,
         expected_items: int | None = None,
     ) -> list[OWNEnergyEvent]:
+        # Kept across attempts so a retry can never return less data than an
+        # earlier, more complete one.
+        best_results: list[OWNEnergyEvent] = []
+
         for attempt in range(retries + 1):
             queue: asyncio.Queue = asyncio.Queue()
             self._energy_waiters.append((matcher, queue))
@@ -359,7 +363,7 @@ class MyHOMEGatewayHandler:
                     if attempt < retries:
                         await asyncio.sleep(retry_delay)
                         continue
-                    return results
+                    return best_results
 
                 # When the exact number of expected replies is known (e.g. the
                 # 24 hourly values of a single day), returning as soon as they
@@ -378,14 +382,31 @@ class MyHOMEGatewayHandler:
                     except asyncio.TimeoutError:
                         break
 
-                return results
+                if len(results) > len(best_results):
+                    best_results = results
+
+                # A partial answer (e.g. only a handful of a day's 24 hourly
+                # values, because the gateway went quiet mid-reply under load)
+                # must be retried rather than accepted. Silently keeping it
+                # under-counts that day, and on a re-import leaves the missing
+                # hours holding a previous run's cumulative offset - which
+                # shows up as a day-wide step in the energy graph.
+                if (
+                    expected_items is not None
+                    and len(best_results) < expected_items
+                    and attempt < retries
+                ):
+                    await asyncio.sleep(retry_delay)
+                    continue
+
+                return best_results
             finally:
                 try:
                     self._energy_waiters.remove((matcher, queue))
                 except ValueError:
                     pass
 
-        return []
+        return best_results
 
     async def fetch_daily_history(
         self,
