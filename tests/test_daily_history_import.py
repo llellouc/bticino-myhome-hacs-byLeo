@@ -40,6 +40,18 @@ async def _statistic_metadata(hass, statistic_id: str):
     )
 
 
+def _import_point_start(hass, day: date) -> datetime:
+    """Compute the expected import write timestamp for a given calendar day.
+
+    Mirrors web.py's own day-shift + local-timezone logic (the reconstructed
+    cumulative point for day D is only known at the start of local day D+1,
+    converted to UTC) so tests stay in sync with production behavior instead
+    of re-deriving/hardcoding the same math separately.
+    """
+    tz = MyHOMEImportDailyEnergyHistoryView._local_tzinfo(hass)
+    return MyHOMEImportDailyEnergyHistoryView._day_end_utc(day, tz)
+
+
 @pytest.mark.parametrize(
     ("sensor_class", "unit_scale", "expected_unit", "expected_values"),
     [
@@ -97,8 +109,8 @@ async def test_import_persists_scaled_daily_statistics(
     persisted = await _statistics_rows(
         hass,
         statistic_id,
-        datetime.combine(history_rows[0]["date"], datetime.min.time(), timezone.utc),
-        datetime.combine(history_rows[-1]["date"], datetime.max.time(), timezone.utc),
+        _import_point_start(hass, history_rows[0]["date"]) - timedelta(hours=1),
+        _import_point_start(hass, history_rows[-1]["date"]) + timedelta(hours=1),
     )
 
     rows = persisted[statistic_id]
@@ -150,7 +162,10 @@ async def test_import_never_overwrites_day_with_partial_existing_hourly_data(
 
     statistic_id = f"{DOMAIN}:{sanitize_key(f'daily_{GATEWAY_MAC}_energy_51')}"
     first_day = history_rows[0]["date"]
-    existing_start = datetime.combine(first_day, datetime.min.time(), timezone.utc)
+    # Exact collision scenario: a real hourly point already sits at the
+    # precise timestamp our own import would write to for first_day (the
+    # start of first_day's local next day, converted to UTC).
+    existing_start = _import_point_start(hass, first_day)
     real_existing_state = 999999.0
 
     async_add_external_statistics(
@@ -198,8 +213,8 @@ async def test_import_never_overwrites_day_with_partial_existing_hourly_data(
     persisted = await _statistics_rows(
         hass,
         statistic_id,
-        existing_start,
-        datetime.combine(history_rows[-1]["date"], datetime.max.time(), timezone.utc),
+        existing_start - timedelta(hours=1),
+        _import_point_start(hass, history_rows[-1]["date"]) + timedelta(hours=1),
     )
     rows = persisted[statistic_id]
 
@@ -242,7 +257,7 @@ async def test_import_can_force_override_hourly_data_when_flag_disabled(
 
     statistic_id = f"{DOMAIN}:{sanitize_key(f'daily_{GATEWAY_MAC}_energy_51')}"
     first_day = history_rows[0]["date"]
-    existing_start = datetime.combine(first_day, datetime.min.time(), timezone.utc)
+    existing_start = _import_point_start(hass, first_day)
     real_existing_state = 999999.0
 
     async_add_external_statistics(
@@ -292,8 +307,8 @@ async def test_import_can_force_override_hourly_data_when_flag_disabled(
     persisted = await _statistics_rows(
         hass,
         statistic_id,
-        existing_start,
-        datetime.combine(history_rows[-1]["date"], datetime.max.time(), timezone.utc),
+        existing_start - timedelta(hours=1),
+        _import_point_start(hass, history_rows[-1]["date"]) + timedelta(hours=1),
     )
     rows = persisted[statistic_id]
 
@@ -348,8 +363,8 @@ async def test_power_energy_import_targets_existing_energy_entity(
     persisted = await _statistics_rows(
         hass,
         entity_id,
-        datetime.combine(history_rows[0]["date"], datetime.min.time(), timezone.utc),
-        datetime.combine(history_rows[-1]["date"], datetime.max.time(), timezone.utc),
+        _import_point_start(hass, history_rows[0]["date"]) - timedelta(hours=1),
+        _import_point_start(hass, history_rows[-1]["date"]) + timedelta(hours=1),
     )
     assert [row["state"] for row in persisted[entity_id]] == [1500.0, 4000.0]
 
@@ -443,8 +458,8 @@ async def test_import_skips_zero_daily_values(
     persisted = await _statistics_rows(
         hass,
         statistic_id,
-        datetime.combine(history_rows[0]["date"], datetime.min.time(), timezone.utc),
-        datetime.combine(history_rows[1]["date"] + timedelta(days=1), datetime.max.time(), timezone.utc),
+        _import_point_start(hass, history_rows[0]["date"]) - timedelta(hours=1),
+        _import_point_start(hass, history_rows[1]["date"]) + timedelta(hours=1),
     )
     assert [row["state"] for row in persisted[statistic_id]] == [1500.0, 4000.0]
 
@@ -513,7 +528,7 @@ async def test_power_energy_import_legacy_entity_naming_fallback(
     persisted = await _statistics_rows(
         hass,
         entity_id,
-        datetime.combine(history_rows[0]["date"], datetime.min.time(), timezone.utc),
-        datetime.combine(history_rows[-1]["date"], datetime.max.time(), timezone.utc),
+        _import_point_start(hass, history_rows[0]["date"]) - timedelta(hours=1),
+        _import_point_start(hass, history_rows[-1]["date"]) + timedelta(hours=1),
     )
     assert [row["state"] for row in persisted[entity_id]] == [1500.0, 4000.0]

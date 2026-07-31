@@ -13,6 +13,7 @@ from homeassistant.components import frontend, panel_custom
 from homeassistant.components.http import HomeAssistantView, StaticPathConfig
 from homeassistant.const import CONF_MAC
 from homeassistant.helpers import entity_registry as er
+from homeassistant.util import dt as dt_util
 
 from .const import (
     CONF_DEVICE_CLASS,
@@ -625,20 +626,64 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
         return None
 
     @staticmethod
+    def _local_tzinfo(hass) -> Any:
+        """Resolve the timezone HA is configured with (falls back to UTC).
+
+        The OpenWebNet protocol's daily_consumption message (dimension 511)
+        reports a calendar day with no timezone marker at all - it reflects
+        whichever local clock the gateway itself is configured with (F454,
+        MH200N, or any other OWN central unit). This is a protocol-wide
+        characteristic, not specific to one gateway model. HA's own
+        configured time_zone is the closest reliable proxy for "the user's
+        local time" without requiring extra configuration, and matches the
+        gateway's clock in the vast majority of installations (same
+        country/region for both).
+        """
+        time_zone_name = getattr(hass.config, "time_zone", None)
+        if time_zone_name:
+            try:
+                tz = dt_util.get_time_zone(time_zone_name)
+            except Exception:  # pylint: disable=broad-except
+                tz = None
+            if tz is not None:
+                return tz
+        return dt_util.DEFAULT_TIME_ZONE or timezone.utc
+
+    @staticmethod
+    def _day_end_utc(day: date, tz: Any) -> datetime:
+        """Return the UTC timestamp for the end of a local calendar day.
+
+        Our reconstructed point represents "the meter's cumulative total
+        once this day's consumption is complete", a value only known at
+        the very start of the *next* local calendar day - not this day's
+        own local midnight. Converting to UTC here (rather than treating
+        local midnight as if it were UTC midnight) avoids a day-shift and
+        several-hour offset that previously misplaced imported points
+        against real hourly statistics.
+        """
+        local_next_day_start = datetime.combine(day + timedelta(days=1), time.min, tzinfo=tz)
+        return local_next_day_start.astimezone(timezone.utc)
+
+    @staticmethod
     def _load_hourly_daily_totals(
         hass,
         recorder_statistics,
         statistic_id: str,
         start_day: date,
         end_day: date,
+        tz: Any,
     ) -> dict[date, dict[str, float]]:
         """Return per-day totals inferred from hourly sums for a statistic."""
         stats_during_period = getattr(recorder_statistics, "statistics_during_period", None)
         if stats_during_period is None:
             return {}
 
-        start_dt = datetime.combine(start_day, time.min, tzinfo=timezone.utc)
-        end_dt = datetime.combine(end_day, time.min, tzinfo=timezone.utc)
+        # Query with a one-day buffer on each side: local calendar days don't
+        # align with UTC day boundaries once a timezone offset is applied, so
+        # widening the UTC window guarantees every real hourly row belonging
+        # to a local day inside [start_day, end_day] is actually returned.
+        start_dt = datetime.combine(start_day, time.min, tzinfo=tz).astimezone(timezone.utc) - timedelta(days=1)
+        end_dt = datetime.combine(end_day, time.min, tzinfo=tz).astimezone(timezone.utc) + timedelta(days=2)
 
         try:
             data = stats_during_period(
@@ -682,36 +727,63 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
             try:
                 if isinstance(row_start, (int, float)):
                     row_start = datetime.fromtimestamp(float(row_start), tz=timezone.utc)
-                day = row_start.date()
+                # Real hourly statistics must be attributed to their LOCAL
+                # calendar day (matching the gateway's own daily_consumption
+                # reporting), not the UTC date of their storage timestamp.
+                local_start = row_start.astimezone(tz)
+                day = local_start.date()
                 by_day.setdefault(day, []).append(float(row_sum))
-                if row_start == datetime.combine(day, time.min, tzinfo=timezone.utc):
-                    midnight_occupied[day] = True
+                if local_start.time() == time.min:
+                    # A real row sitting exactly at local midnight is the end
+                    # of the *previous* local day (see _day_end_utc): that is
+                    # the exact timestamp our own import would write to for
+                    # that previous day, so flag a collision on it, not on
+                    # the day this row's own local date falls into.
+                    midnight_occupied[day - timedelta(days=1)] = True
             except Exception:  # pylint: disable=broad-except
                 continue
 
         result: dict[date, dict[str, float]] = {}
-        for day, sums in by_day.items():
-            # A day is included here whenever it has at least one existing
-            # hourly point, purely to feed the cumulative-offset alignment
-            # estimate below (subject to _is_close_daily_value's tolerance
-            # check, which naturally rejects unrepresentative single-hour
-            # totals). Whether a day is safe to *import into* is a separate
-            # question decided by "midnight_occupied" below: our own import
-            # always writes a single point at the day's midnight (UTC), and
-            # HA's hourly statistics compiler always aligns real hourly rows
-            # to exact hour boundaries, so checking for an existing row at
-            # exactly that timestamp reliably detects a real collision
-            # without needing any time-window tolerance.
-            min_sum = min(sums)
-            max_sum = max(sums)
-            if max_sum < min_sum:
-                continue
-            result[day] = {
-                "value": max_sum - min_sum,
-                "end_sum": max_sum,
-                "points": float(len(sums)),
-                "midnight_occupied": 1.0 if midnight_occupied.get(day) else 0.0,
-            }
+        # Iterate the union of both keysets: "midnight_occupied" is recorded
+        # against the PREVIOUS day (the day our own import would collide on),
+        # which may not itself have any other real hourly point (e.g. the
+        # very first hour of live collection landing exactly on local
+        # midnight) and therefore may be absent from "by_day".
+        for day in set(by_day) | set(midnight_occupied):
+            sums = by_day.get(day)
+            if sums:
+                # A day is included here whenever it has at least one existing
+                # hourly point, purely to feed the cumulative-offset alignment
+                # estimate below (subject to _is_close_daily_value's tolerance
+                # check, which naturally rejects unrepresentative single-hour
+                # totals). Whether a day is safe to *import into* is a separate
+                # question decided by "midnight_occupied" below: our own import
+                # always writes a single point at the end of the local day
+                # (converted to UTC), and HA's hourly statistics compiler always
+                # aligns real hourly rows to exact hour boundaries, so checking
+                # for an existing row at exactly that timestamp reliably detects
+                # a real collision without needing any time-window tolerance.
+                min_sum = min(sums)
+                max_sum = max(sums)
+                if max_sum < min_sum:
+                    continue
+                result[day] = {
+                    "value": max_sum - min_sum,
+                    "end_sum": max_sum,
+                    "points": float(len(sums)),
+                    "midnight_occupied": 1.0 if midnight_occupied.get(day) else 0.0,
+                }
+            else:
+                # No real hourly point is itself attributed to this day, but
+                # a real point exists at exactly the timestamp our import
+                # would write to for it - still a genuine collision to skip,
+                # even without a "value"/"end_sum" to offer for alignment.
+                result[day] = {
+                    "value": 0.0,
+                    "end_sum": None,
+                    "points": 0.0,
+                    "midnight_occupied": 1.0,
+                }
         return result
 
     @staticmethod
@@ -1059,6 +1131,12 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
                         statistic_id,
                     )
 
+                # OWN daily_consumption messages carry no timezone marker -
+                # the gateway reports the calendar day of its own local
+                # clock. HA's configured time_zone is used as the reliable
+                # local-time reference for all day-boundary math below.
+                local_tz = self._local_tzinfo(hass)
+
                 metadata = StatisticMetaData(
                     mean_type=StatisticMeanType.NONE,
                     has_mean=False,
@@ -1070,7 +1148,7 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
                     unit_of_measurement=unit,
                 )
 
-                today = date.today()
+                today = dt_util.now(local_tz).date()
                 source_rows = sorted(rows, key=lambda item: item["date"])
                 filtered_rows = [row for row in source_rows if row["date"] < today]
 
@@ -1089,6 +1167,7 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
                             statistic_id,
                             first_day,
                             last_day,
+                            local_tz,
                         )
                     except Exception as err:  # pylint: disable=broad-except
                         errors.append(
@@ -1176,11 +1255,7 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
                         sum_aligned_to_existing = True
                     elif len(rows_to_import) > 0:
                         # Fallback when no reliable overlap anchor exists.
-                        first_import_start = datetime.combine(
-                            rows_to_import[0][0],
-                            time.min,
-                            tzinfo=timezone.utc,
-                        )
+                        first_import_start = self._day_end_utc(rows_to_import[0][0], local_tz)
                         try:
                             first_existing_sum = await recorder_instance.async_add_executor_job(
                                 self._find_first_existing_sum_from,
@@ -1198,11 +1273,7 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
                         if first_existing_sum is not None:
                             first_existing_start = first_existing_sum["start"]
                             first_existing_value = float(first_existing_sum["sum"])
-                            last_import_start = datetime.combine(
-                                rows_to_import[-1][0],
-                                time.min,
-                                tzinfo=timezone.utc,
-                            )
+                            last_import_start = self._day_end_utc(rows_to_import[-1][0], local_tz)
                             if first_existing_start > last_import_start:
                                 imported_total = sum(value for _day, value in rows_to_import)
                                 sum_alignment_offset = first_existing_value - imported_total
@@ -1234,7 +1305,7 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
                 for day, value in rows_to_import:
                     running_sum = sum_alignment_offset + imported_cumulative_by_day[day]
 
-                    start_at = datetime.combine(day, time.min, tzinfo=timezone.utc)
+                    start_at = self._day_end_utc(day, local_tz)
                     statistics_rows.append(
                         StatisticData(
                             start=start_at,
