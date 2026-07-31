@@ -5,6 +5,8 @@ import re
 from datetime import date, timedelta
 from typing import Any, Callable, Dict, List
 
+from dateutil.relativedelta import relativedelta
+
 from homeassistant.const import (
     CONF_ENTITIES,
     CONF_HOST,
@@ -306,19 +308,26 @@ class MyHOMEGatewayHandler:
 
     @staticmethod
     def _iter_recent_months(months_back: int) -> list[tuple[int, int]]:
-        months: list[tuple[int, int]] = []
+        """Return every calendar month touched by the last `months_back` months.
+
+        Uses a real duration-based cutoff (today - N months, e.g. what C#'s
+        AddMonths(-N) or dateutil's relativedelta gives) rather than counting
+        N calendar month *labels* back from the current one - the latter
+        undercounts by up to a full month because the current, partial month
+        is counted the same as a full prior month.
+        """
         today = date.today()
-        year = today.year
-        month = today.month
+        cutoff = today - relativedelta(months=max(1, months_back))
 
-        for _ in range(max(1, months_back)):
+        months: list[tuple[int, int]] = []
+        year, month = cutoff.year, cutoff.month
+        while (year, month) <= (today.year, today.month):
             months.append((year, month))
-            month -= 1
-            if month == 0:
-                month = 12
-                year -= 1
+            month += 1
+            if month == 13:
+                month = 1
+                year += 1
 
-        months.reverse()
         return months
 
     async def _collect_energy_events(

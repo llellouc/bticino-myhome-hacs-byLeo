@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import date, datetime, time, timedelta, timezone
 from http import HTTPStatus
 from json import JSONDecodeError
@@ -1463,21 +1464,23 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
                 # before the retried import has actually run/committed,
                 # producing a false-negative "Recorder persisted 0/N" error.
                 #
-                # HA's own recorder test helpers handle this exact class of
-                # self-rescheduling task (see async_wait_purge_done) by calling
-                # async_block_till_done() multiple times in a row: each extra
-                # call's sentinel is guaranteed to run after anything the
-                # previous cycle re-queued. Do the same here instead of a
-                # blind time-based retry.
-                max_drain_cycles = 5
-                for _ in range(max_drain_cycles):
-                    await recorder_instance.async_block_till_done()
+                # A fixed number of drain cycles never fully rules this out
+                # (a requeue can always land right after the last one), and
+                # large imports (hundreds/thousands of rows) can legitimately
+                # take a while to fully commit under load. Use exponential
+                # backoff (1s, 2s, 4s, ...) instead, bounded by a total
+                # verification budget, re-draining and re-checking on each
+                # step until every row matches or the budget runs out.
+                max_verify_seconds = 30.0
 
                 for imported_result, statistic_id, statistics_rows in persistence_checks:
                     expected_rows = len(statistics_rows)
                     persisted_rows = 0
                     verification_error: Exception | None = None
-                    for attempt in range(max_drain_cycles):
+                    elapsed = 0.0
+                    delay = 1.0
+                    while True:
+                        await recorder_instance.async_block_till_done()
                         try:
                             persisted_rows = await recorder_instance.async_add_executor_job(
                                 self._persisted_statistics_count,
@@ -1493,11 +1496,12 @@ class MyHOMEImportDailyEnergyHistoryView(HomeAssistantView):
 
                         if verification_error is None and persisted_rows == expected_rows:
                             break
-                        if attempt < max_drain_cycles - 1:
-                            # Drain again: the previous check may have run
-                            # while a self-requeued import task was still
-                            # in flight.
-                            await recorder_instance.async_block_till_done()
+                        if elapsed >= max_verify_seconds:
+                            break
+                        sleep_for = min(delay, max_verify_seconds - elapsed)
+                        await asyncio.sleep(sleep_for)
+                        elapsed += sleep_for
+                        delay = min(delay * 2, max_verify_seconds)
 
                     if verification_error is not None:
                         errors.append(

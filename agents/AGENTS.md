@@ -3,6 +3,9 @@
 Ce fichier complete les instructions globales du workspace.
 Priorite ici: maintenance et evolution du fork BTicino MyHome pour Home Assistant.
 
+Voir aussi `agents/agents_import.md` pour l'architecture detaillee et les
+choix de conception de la fonctionnalite d'import d'historique d'energie/eau.
+
 ## Repo cible
 - Fork principal: llellouc/bticino-myhome-hacs-integration
 - Integration HA: custom_components/bticino_myhome
