@@ -90,6 +90,14 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
     for _sensor in _configured_sensors.keys():
         _sensor_config = _configured_sensors[_sensor]
         _device_class = _sensor_config[CONF_DEVICE_CLASS]
+        _who = _sensor_config.get(CONF_WHO)
+        if _who is None:
+            if is_power_class(_device_class) or is_water_sensor(_device_class):
+                _who = "18"
+            elif is_temperature_sensor(_device_class):
+                _who = "4"
+            elif is_illuminance_sensor(_device_class):
+                _who = "1"
 
         if is_energy_sensor(_device_class):
             _required_entities = get_required_entities(_sensor_config)
@@ -118,12 +126,12 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
                     MyHOMEPowerSensor(
                         hass=hass,
                         device_id=_sensor,
-                        who=_sensor_config[CONF_WHO],
+                        who=_who,
                         where=_sensor_config[CONF_WHERE],
                         name=_sensor_config[CONF_NAME],
                         device_class=_device_class,
                         manufacturer=_sensor_config[CONF_MANUFACTURER],
-                        model=_sensor_config[CONF_DEVICE_MODEL],
+                        model=_sensor_config.get(CONF_DEVICE_MODEL),
                         unit_scale=_sensor_config.get(CONF_UNIT_SCALE, "base"),
                         gateway=hass.data[DOMAIN][config_entry.data[CONF_MAC]][
                             CONF_ENTITY
@@ -138,14 +146,14 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
                     MyHOMEEnergySensor(
                         hass=hass,
                         device_id=_sensor,
-                        who=_sensor_config[CONF_WHO],
+                        who=_who,
                         where=_sensor_config[CONF_WHERE],
                         name=_sensor_config[CONF_NAME],
                         entity_specific_id=entity_specific_id,
                         device_class=SensorDeviceClass.ENERGY,
                         unit_scale=_sensor_config.get(CONF_UNIT_SCALE, "base"),
                         manufacturer=_sensor_config[CONF_MANUFACTURER],
-                        model=_sensor_config[CONF_DEVICE_MODEL],
+                        model=_sensor_config.get(CONF_DEVICE_MODEL),
                         gateway=hass.data[DOMAIN][config_entry.data[CONF_MAC]][
                             CONF_ENTITY
                         ],
@@ -160,12 +168,12 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
                 MyHOMEWaterFlowSensor(
                     hass=hass,
                     device_id=_sensor,
-                    who=_sensor_config[CONF_WHO],
+                    who=_who,
                     where=_sensor_config[CONF_WHERE],
                     name=_sensor_config[CONF_NAME],
                     unit_scale=_sensor_config.get(CONF_UNIT_SCALE, "base"),
                     manufacturer=_sensor_config[CONF_MANUFACTURER],
-                    model=_sensor_config[CONF_DEVICE_MODEL],
+                    model=_sensor_config.get(CONF_DEVICE_MODEL),
                     gateway=hass.data[DOMAIN][config_entry.data[CONF_MAC]][
                         CONF_ENTITY
                     ],
@@ -179,13 +187,13 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
                     MyHOMEWaterVolumeSensor(
                         hass=hass,
                         device_id=_sensor,
-                        who=_sensor_config[CONF_WHO],
+                        who=_who,
                         where=_sensor_config[CONF_WHERE],
                         name=_sensor_config[CONF_NAME],
                         entity_specific_id=entity_specific_id,
                         unit_scale=_sensor_config.get(CONF_UNIT_SCALE, "base"),
                         manufacturer=_sensor_config[CONF_MANUFACTURER],
-                        model=_sensor_config[CONF_DEVICE_MODEL],
+                        model=_sensor_config.get(CONF_DEVICE_MODEL),
                         gateway=hass.data[DOMAIN][config_entry.data[CONF_MAC]][
                             CONF_ENTITY
                         ],
@@ -197,12 +205,12 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
                 MyHOMETemperatureSensor(
                     hass=hass,
                     device_id=_sensor,
-                    who=_sensor_config[CONF_WHO],
+                    who=_who,
                     where=_sensor_config[CONF_WHERE],
                     name=_sensor_config[CONF_NAME],
                     device_class=_device_class,
                     manufacturer=_sensor_config[CONF_MANUFACTURER],
-                    model=_sensor_config[CONF_DEVICE_MODEL],
+                    model=_sensor_config.get(CONF_DEVICE_MODEL),
                     gateway=hass.data[DOMAIN][config_entry.data[CONF_MAC]][CONF_ENTITY],
                 )
             )
@@ -212,12 +220,12 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
                 MyHOMEIlluminanceSensor(
                     hass=hass,
                     device_id=_sensor,
-                    who=_sensor_config[CONF_WHO],
+                    who=_who,
                     where=_sensor_config[CONF_WHERE],
                     name=_sensor_config[CONF_NAME],
                     device_class=_device_class,
                     manufacturer=_sensor_config[CONF_MANUFACTURER],
-                    model=_sensor_config[CONF_DEVICE_MODEL],
+                    model=_sensor_config.get(CONF_DEVICE_MODEL),
                     gateway=hass.data[DOMAIN][config_entry.data[CONF_MAC]][CONF_ENTITY],
                 )
             )

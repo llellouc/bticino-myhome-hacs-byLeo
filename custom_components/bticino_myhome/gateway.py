@@ -1258,13 +1258,21 @@ class MyHOMEGatewayHandler:
             for platform, entities in platforms.items():
                 if platform == BUTTON:
                     continue
-                for where in entities:
+                for device_data in entities.values():
                     try:
+                        where = device_data.get(CONF_WHERE)
+                        zone = device_data.get(CONF_ZONE)
                         if platform == CLIMATE:
-                            await self.send_status_request(OWNHeatingCommand.status(where))
+                            if zone is None:
+                                continue
+                            await self.send_status_request(OWNHeatingCommand.status(zone))
                         elif platform == LIGHT:
+                            if where is None:
+                                continue
                             await self.send_status_request(OWNLightingCommand.status(where))
                         elif platform == "cover":
+                            if where is None:
+                                continue
                             await self.send_status_request(OWNAutomationCommand.status(where))
                         total += 1
                     except Exception:  # pylint: disable=broad-except
