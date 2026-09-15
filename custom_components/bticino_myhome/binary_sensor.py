@@ -151,13 +151,16 @@ class MyHOMEDryContact(MyHOMEEntity, BinarySensorEntity):
 
     async def async_added_to_hass(self):
         """When entity is added to hass."""
-        self._hass.data[DOMAIN][self._gateway_handler.mac][CONF_PLATFORMS][self._platform][self._device_id][CONF_ENTITIES][self._attr_device_class] = self
+        device_data = self._hass.data[DOMAIN][self._gateway_handler.mac][CONF_PLATFORMS][self._platform][self._device_id]
+        device_entities = device_data.setdefault(CONF_ENTITIES, {})
+        device_entities[self._attr_device_class] = self
         await self.async_update()
 
     async def async_will_remove_from_hass(self):
         """When entity is removed from hass."""
-        if self._attr_device_class in self._hass.data[DOMAIN][self._gateway_handler.mac][CONF_PLATFORMS][self._platform][self._device_id][CONF_ENTITIES]:
-            del self._hass.data[DOMAIN][self._gateway_handler.mac][CONF_PLATFORMS][self._platform][self._device_id][CONF_ENTITIES][self._attr_device_class]
+        device_entities = self._hass.data[DOMAIN][self._gateway_handler.mac][CONF_PLATFORMS][self._platform][self._device_id].get(CONF_ENTITIES, {})
+        if self._attr_device_class in device_entities:
+            del device_entities[self._attr_device_class]
 
     async def async_update(self):
         """Update the entity.
@@ -216,13 +219,16 @@ class MyHOMEAuxiliary(MyHOMEEntity, BinarySensorEntity):
 
     async def async_added_to_hass(self):
         """When entity is added to hass."""
-        self._hass.data[DOMAIN][self._gateway_handler.mac][CONF_PLATFORMS][self._platform][self._device_id][CONF_ENTITIES][self._attr_device_class] = self
+        device_data = self._hass.data[DOMAIN][self._gateway_handler.mac][CONF_PLATFORMS][self._platform][self._device_id]
+        device_entities = device_data.setdefault(CONF_ENTITIES, {})
+        device_entities[self._attr_device_class] = self
         await self.async_update()
 
     async def async_will_remove_from_hass(self):
         """When entity is removed from hass."""
-        if self._attr_device_class in self._hass.data[DOMAIN][self._gateway_handler.mac][CONF_PLATFORMS][self._platform][self._device_id][CONF_ENTITIES]:
-            del self._hass.data[DOMAIN][self._gateway_handler.mac][CONF_PLATFORMS][self._platform][self._device_id][CONF_ENTITIES][self._attr_device_class]
+        device_entities = self._hass.data[DOMAIN][self._gateway_handler.mac][CONF_PLATFORMS][self._platform][self._device_id].get(CONF_ENTITIES, {})
+        if self._attr_device_class in device_entities:
+            del device_entities[self._attr_device_class]
 
     async def async_update(self):
         """AUX sensors are read only and cannot be queried, no async_update implementation."""
