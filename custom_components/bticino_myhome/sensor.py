@@ -290,6 +290,7 @@ class MyHOMEPowerSensor(MyHOMEEntity, SensorEntity):
         self._attr_unique_id = (
             f"{gateway.mac}-{self._device_id}-{self._attr_device_class}"
         )
+        self._set_entity_id(self._entity_specific_name)
         self._attr_native_unit_of_measurement = (
             UnitOfPower.KILO_WATT
             if self._unit_scale == "kilo"
@@ -388,6 +389,7 @@ class MyHOMEEnergySensor(MyHOMEEntity, SensorEntity):
         self._attr_unique_id = (
             f"{gateway.mac}-{self._device_id}-{self._entity_specific_id}"
         )
+        self._set_entity_id(self._entity_specific_name)
         self._attr_device_class = device_class
         self._unit_scale = unit_scale
         self._attr_native_unit_of_measurement = (
@@ -523,6 +525,7 @@ class MyHOMEWaterFlowSensor(MyHOMEEntity, SensorEntity):
         self._attr_unique_id = (
             f"{gateway.mac}-{self._device_id}-{SensorDeviceClass.WATER}"
         )
+        self._set_entity_id(self._entity_specific_name)
         self._attr_native_unit_of_measurement = (
             getattr(UnitOfVolumeFlowRate, "CUBIC_METERS_PER_HOUR", "m3/h")
             if self._unit_scale == "kilo"
@@ -619,6 +622,7 @@ class MyHOMEWaterVolumeSensor(MyHOMEEntity, SensorEntity):
         self._attr_unique_id = (
             f"{gateway.mac}-{self._device_id}-{self._entity_specific_id}"
         )
+        self._set_entity_id(self._entity_specific_name)
         self._attr_device_class = SensorDeviceClass.WATER
         self._unit_scale = unit_scale
         self._attr_native_unit_of_measurement = (
@@ -753,6 +757,7 @@ class MyHOMETemperatureSensor(MyHOMEEntity, SensorEntity):
         self._attr_unique_id = (
             f"{gateway.mac}-{self._device_id}-{self._attr_device_class}"
         )
+        self._set_entity_id(self._entity_specific_name)
         self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
         self._attr_state_class = SensorStateClass.MEASUREMENT
         self._attr_should_poll = True
@@ -847,6 +852,7 @@ class MyHOMEIlluminanceSensor(MyHOMEEntity, SensorEntity):
         self._attr_unique_id = (
             f"{gateway.mac}-{self._device_id}-{self._attr_device_class}"
         )
+        self._set_entity_id(self._entity_specific_name)
         self._attr_native_unit_of_measurement = LIGHT_LUX
         self._attr_state_class = SensorStateClass.MEASUREMENT
         self._attr_native_value = None

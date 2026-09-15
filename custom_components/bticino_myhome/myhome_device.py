@@ -8,9 +8,10 @@ if TYPE_CHECKING:
 
 from homeassistant.helpers.entity import Entity
 from homeassistant.const import CONF_ENTITIES
+from homeassistant.util import slugify
 
 
-from .const import DOMAIN, CONF_PLATFORMS, CONF_ENTITIES
+from .const import DOMAIN, CONF_ENTITIES, CONF_PARENT_ID, CONF_PLATFORMS
 
 
 class MyHOMEEntity(Entity):
@@ -28,6 +29,7 @@ class MyHOMEEntity(Entity):
     ):
         self._hass = hass
         self._platform = platform
+        self._device_name = name
         self._who = who
         self._where = where
         self._device_id = device_id
@@ -45,8 +47,18 @@ class MyHOMEEntity(Entity):
             "name": name,
             "manufacturer": self._manufacturer,
             "model": self._model,
-            "via_device": (DOMAIN, self._gateway_handler.unique_id),
         }
+        parent_device_id = hass.data[DOMAIN][gateway.mac].get(CONF_PARENT_ID)
+        if parent_device_id is not None:
+            self._attr_device_info["via_device_id"] = parent_device_id
+        self._set_entity_id()
+
+    def _set_entity_id(self, suffix: str | None = None) -> None:
+        """Set a stable, readable entity ID before registry registration."""
+        object_id = slugify(
+            "_".join(part for part in (self._device_name, suffix) if part)
+        )
+        self.entity_id = f"{self._platform}.{object_id}"
 
     async def async_added_to_hass(self):
         """When entity is added to hass."""
