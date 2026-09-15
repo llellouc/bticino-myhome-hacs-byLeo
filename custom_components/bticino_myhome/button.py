@@ -54,7 +54,7 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
             ),
             name=_configured_buttons[_button][CONF_NAME],
             manufacturer=_configured_buttons[_button][CONF_MANUFACTURER],
-            model=_configured_buttons[_button][CONF_DEVICE_MODEL],
+            model=_configured_buttons[_button].get(CONF_DEVICE_MODEL),
             gateway=hass.data[DOMAIN][config_entry.data[CONF_MAC]][CONF_ENTITY],
         )
         _buttons.append(_disable_button)
@@ -72,7 +72,7 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
             ),
             name=_configured_buttons[_button][CONF_NAME],
             manufacturer=_configured_buttons[_button][CONF_MANUFACTURER],
-            model=_configured_buttons[_button][CONF_DEVICE_MODEL],
+            model=_configured_buttons[_button].get(CONF_DEVICE_MODEL),
             gateway=hass.data[DOMAIN][config_entry.data[CONF_MAC]][CONF_ENTITY],
         )
         _buttons.append(_enable_button)

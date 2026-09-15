@@ -176,7 +176,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         ].keys():
             for _entity_name in hass.data[DOMAIN][entry.data[CONF_MAC]][CONF_PLATFORMS][
                 _platform
-            ][_device][CONF_ENTITIES]:
+            ][_device].get(CONF_ENTITIES, {}):
                 if _entity_name != _platform:
                     configured_entities.append(
                         f"{entry.data[CONF_MAC]}-{_device}-{_entity_name}"
