@@ -1071,7 +1071,8 @@ class MyHOMEGatewayHandler:
                 for _entity in platform_data[message.entity].get(CONF_ENTITIES, {}):
                     entity = platform_data[message.entity][CONF_ENTITIES][_entity]
                     if isinstance(entity, MyHOMEEntity):
-                        entity.handle_event(message)
+                        if hasattr(entity, "handle_event"):
+                            entity.handle_event(message)
 
     async def send_status_request(self, message: OWNCommand):
         await self.send_buffer.put({"message": message, "is_status_request": True})
